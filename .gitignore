@@ -46,3 +46,5 @@ pip-wheel-metadata/
 # dotenv
 .env
 **test_local**
+/**downloads/**
+**.vscode/**
