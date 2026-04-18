@@ -77,9 +77,9 @@ class PrinterBot:
 
     HELP_MESSAGE = (
         "📋 **Available Commands:**\n"
-        "├─ `show_dir` - 📁 Show your downloads directory\n"
-        "├─ `print` - 🖨️ Print your files\n"
-        "└─ `help` - ❓ Show this help message\n\n"
+        "├─ 1. `show_dir` - 📁 Show your downloads directory\n"
+        "├─ 2. `print` - 🖨️ Print your files\n"
+        "└─ h `help` - ❓ Show this help message\n\n"
         "💡 **Example:** `show_dir`"
     )
 
@@ -269,7 +269,7 @@ class PrinterBot:
             elif msg:
                 command = msg.lower().strip()
                 match command:
-                    case "show_dir":
+                    case "1":
                         user_dir = os.path.join(self.downloads_dir, sender_id)
                         
                         # Check if directory exists
@@ -308,10 +308,10 @@ class PrinterBot:
                         message += f"\n\n📊 **Total:** {len(files)} files"
                         
                         await self.rocket.send_message(message, room_id)
-                    case "print":
+                    case "2":
                         pass
 
-                    case "help":
+                    case "h":
                         await self.rocket.send_message(
                             f"❓ **Bot Help**\n\n{self.HELP_MESSAGE}", room_id
                         )
