@@ -48,3 +48,4 @@ pip-wheel-metadata/
 **test_local**
 /**downloads/**
 **.vscode/**
+test_local/**

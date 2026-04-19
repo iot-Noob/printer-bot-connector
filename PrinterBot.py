@@ -21,9 +21,9 @@ from rocketchat_API.rocketchat import RocketChat as RestRocketChat
 original_connect = websockets.connect
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 from urllib.parse import unquote
-
+from MenuOptionHelper import DynamicMenu
 load_dotenv()
-
+from MenuOptionHelper import DynamicMenu
 
 def patched_connect(uri, **kwargs):
     kwargs["ssl"] = kwargs.get("ssl", True)
@@ -74,7 +74,7 @@ class PrinterBot:
             print(f"📁 Created downloads directory: {self.downloads_dir}")
         self.subscribers = {}
         self._processing_messages = set()
-
+        self.dmc=None
     HELP_MESSAGE = (
         "📋 **Available Commands:**\n"
         "├─ 1. `show_dir` - 📁 Show your downloads directory\n"
@@ -119,10 +119,14 @@ class PrinterBot:
             #     server_url=server_url_str,
             #     ssl_verify=False
             # )
+            self.dmc=DynamicMenu(self)
+            self._register_menus()
             print("✅ Connected!")
 
         except Exception as e:
             raise ValueError(f"error occur connect: {e}")
+
+  
 
     async def download_file(
         self, file_link: str, file_name: str, user_data: dict = {}
@@ -231,6 +235,96 @@ class PrinterBot:
             print(f"Error walking dir: {e}")
             return []
 
+    async def custom_list(self,user_id):
+        try:
+            user_dir = os.path.join(self.downloads_dir, user_id)
+            if not os.path.exists(user_dir):
+                return "📁 No files found. Send me a file!"
+            
+            files=[]
+            
+
+        except Exception as e:
+            raise ValueError(f"Error occur show custom list due to {e}")
+    
+    def _register_menus(self):
+        """Register all menus and submenus"""
+        
+        # Main Menu
+        self.dmc.register_callable_menu("main", "📋 Main Menu", {
+            "1": {"text": "📁 Show Downloads", "action": self.menu_show_downloads},
+            "2": {"text": "🖨️ Print Files", "next_menu": "print_menu"},
+            "h": {"text": "❓ Help", "action": self.menu_help},
+        })
+        
+        # Print Submenu
+        self.dmc.register_callable_menu("print_menu", "🖨️ Print Menu", {
+            "1": {"text": "Print All Files", "action": self.menu_print_all},
+            "2": {"text": "Print Last File", "action": self.menu_print_last},
+            "3": {"text": "Custom Print File", "next_menu": "custom_print_file"},
+            "b": {"text": "◀ Back", "next_menu": "main"},
+        })
+        self.dmc.register_callable_menu("custom_print_file", "🖨️ Print Menu", {
+            "1": {"text": "Print All Files", "action":""},
+
+            "b": {"text": "◀ Back", "next_menu": "main"},
+        })
+    async def menu_show_downloads(self, user_id: str, room_id: str) -> str:
+        """Show user's downloads directory"""
+        user_dir = os.path.join(self.downloads_dir, user_id)
+        
+        if not os.path.exists(user_dir):
+            return "📁 No files found. Send me a file!"
+        
+        files = []
+        for f in os.listdir(user_dir):
+            f_path = os.path.join(user_dir, f)
+            if os.path.isfile(f_path):
+                file_size = os.path.getsize(f_path)
+                files.append(f"• `{f}` ({self._format_size(file_size)})")
+        
+        if not files:
+            return "📁 Directory is empty."
+        
+        file_list = "\n".join(files[:20])
+        remaining = len(files) - 20
+        
+        message = f"📁 **Your Downloads**\n\n{file_list}"
+        if remaining > 0:
+            message += f"\n\n... and {remaining} more files"
+        message += f"\n\n📊 Total: {len(files)} files"
+        
+        return message
+
+    async def menu_help(self, user_id: str, room_id: str) -> str:
+        """Show help"""
+        return self.HELP_MESSAGE
+
+    async def menu_print_all(self, user_id: str, room_id: str) -> str:
+        """Print all files"""
+        user_dir = os.path.join(self.downloads_dir, user_id)
+        if not os.path.exists(user_dir):
+            return "📁 No files found."
+        
+        files = [f for f in os.listdir(user_dir) if os.path.isfile(os.path.join(user_dir, f))]
+        if not files:
+            return "📁 No files to print."
+        
+        # TODO: Add actual printing logic here
+        return f"🖨️ Printing {len(files)} file(s)..."
+
+    async def menu_print_last(self, user_id: str, room_id: str) -> str:
+        """Print last file"""
+        user_dir = os.path.join(self.downloads_dir, user_id)
+        if not os.path.exists(user_dir):
+            return "📁 No files found."
+        
+        files = [f for f in os.listdir(user_dir) if os.path.isfile(os.path.join(user_dir, f))]
+        if not files:
+            return "📁 No files to print."
+        
+        # TODO: Add actual printing logic here
+        return f"🖨️ Printing last file: {files[-1]}"
     async def chat_bot(
         self,
         file: dict = {},
@@ -268,59 +362,81 @@ class PrinterBot:
             
             elif msg:
                 command = msg.lower().strip()
+                handled = await self.dmc.menu_worker(sender_id, command, room_id)
                 match command:
-                    case "1":
-                        user_dir = os.path.join(self.downloads_dir, sender_id)
-                        
-                        # Check if directory exists
-                        if not os.path.exists(user_dir):
-                            await self.rocket.send_message(
-                                f"📁 **Your Downloads Directory**\n\n"
-                                f"No files found. Send me a file to get started!",
-                                room_id
-                            )
-                            return
-                        
-                        # Get files
-                        files = []
-                        for f in os.listdir(user_dir):
-                            f_path = os.path.join(user_dir, f)
-                            if os.path.isfile(f_path):
-                                file_size = os.path.getsize(f_path)
-                                files.append(f"• `{f}` ({self._format_size(file_size)})")
-                        
-                        if not files:
-                            await self.rocket.send_message(
-                                f"📁 **Your Downloads Directory**\n\n"
-                                f"Directory exists but is empty.",
-                                room_id
-                            )
-                            return
-                        
-                        # Format message (limit to 20 files to avoid message too long)
-                        file_list = "\n".join(files[:20])
-                        remaining = len(files) - 20
-                        
-                        message = f"📁 **Your Downloads Directory**\n\n"
-                        message += file_list
-                        if remaining > 0:
-                            message += f"\n\n... and {remaining} more files"
-                        message += f"\n\n📊 **Total:** {len(files)} files"
-                        
-                        await self.rocket.send_message(message, room_id)
-                    case "2":
-                        pass
-
-                    case "h":
-                        await self.rocket.send_message(
-                            f"❓ **Bot Help**\n\n{self.HELP_MESSAGE}", room_id
-                        )
-
+                    case "menu":
+                        if not handled:
+                            await self.dmc.set_user_menu(sender_id, "main")
+                            await self.dmc._display_menu(sender_id, room_id, "main")
                     case _:
-                        await self.rocket.send_message(
-                            f"❌ **Invalid Command**\n\n{self.HELP_MESSAGE}", room_id
-                        )
-                pass
+                        if not handled and not await self.dmc.is_in_menu(sender_id):
+                            await self.dmc.set_user_menu(sender_id, "main")
+                            await self.dmc._display_menu(sender_id, room_id, "main")
+                # handled = await self.dmc.menu_worker(sender_id, command, room_id)
+                # match command:
+
+                #     case _:
+                #         await self.dmc.set_user_menu(sender_id, "main")
+                #         await self.dmc._display_menu(sender_id, room_id, "main")
+                # # If not handled (user not in menu), offer to start menu
+                # if not handled and command == "menu":
+                #     await self.dmc.set_user_menu(sender_id, "main")
+                #     await self.dmc._display_menu(sender_id, room_id, "main")
+                # elif not handled:
+                #     await self.rocket.send_message("Type `menu` to see available commands", room_id)
+                # match command:
+                #     case "1":
+                #         user_dir = os.path.join(self.downloads_dir, sender_id)
+                        
+                #         # Check if directory exists
+                #         if not os.path.exists(user_dir):
+                #             await self.rocket.send_message(
+                #                 f"📁 **Your Downloads Directory**\n\n"
+                #                 f"No files found. Send me a file to get started!",
+                #                 room_id
+                #             )
+                #             return
+                        
+                #         # Get files
+                #         files = []
+                #         for f in os.listdir(user_dir):
+                #             f_path = os.path.join(user_dir, f)
+                #             if os.path.isfile(f_path):
+                #                 file_size = os.path.getsize(f_path)
+                #                 files.append(f"• `{f}` ({self._format_size(file_size)})")
+                        
+                #         if not files:
+                #             await self.rocket.send_message(
+                #                 f"📁 **Your Downloads Directory**\n\n"
+                #                 f"Directory exists but is empty.",
+                #                 room_id
+                #             )
+                #             return
+                        
+                #         # Format message (limit to 20 files to avoid message too long)
+                #         file_list = "\n".join(files[:20])
+                #         remaining = len(files) - 20
+                        
+                #         message = f"📁 **Your Downloads Directory**\n\n"
+                #         message += file_list
+                #         if remaining > 0:
+                #             message += f"\n\n... and {remaining} more files"
+                #         message += f"\n\n📊 **Total:** {len(files)} files"
+                        
+                #         await self.rocket.send_message(message, room_id)
+                #     case "2":
+                #         pass
+
+                #     case "h":
+                #         await self.rocket.send_message(
+                #             f"❓ **Bot Help**\n\n{self.HELP_MESSAGE}", room_id
+                #         )
+
+                #     case _:
+                #         await self.rocket.send_message(
+                #             f"❌ **Invalid Command**\n\n{self.HELP_MESSAGE}", room_id
+                #         )
+                
 
         except Exception as e:
             raise ValueError(f"Error occur chat bot due to {e}")
