@@ -18,7 +18,19 @@ class PrintManager:
         """Fetch available printers asynchronously."""
         try:
             if os.name == 'nt':
-                # Windows - Using array arguments to avoid injection
+                # Windows - Try PowerShell first (more reliable on modern Win10/11)
+                ps_cmd = ['powershell', '-NoProfile', '-Command', 'Get-CimInstance Win32_Printer | Select-Object -ExpandProperty Name']
+                process = await asyncio.create_subprocess_exec(
+                    *ps_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE
+                )
+                stdout, _ = await process.communicate()
+                output = stdout.decode().strip()
+                if output:
+                    return [p.strip() for p in output.split('\r\n') if p.strip()]
+                
+                # Fallback to wmic
                 cmd = ['wmic', 'printer', 'get', 'name']
             else:
                 # Linux - Using standard lpstat
@@ -110,7 +122,7 @@ class PrintManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate(timeout=10)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
             
             if process.returncode == 0:
                 logger.info(f"Cancelled job: {job_id}")
@@ -118,8 +130,42 @@ class PrintManager:
             else:
                 logger.error(f"Failed to cancel job {job_id}: {stderr.decode()}")
                 return False
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout cancelling job {job_id}")
+            return False
         except Exception as e:
             logger.error(f"Cancel error: {e}")
+            return False
+
+    async def resume_print_job(self, job_id: str) -> bool:
+        """Force resume a print job by ID (Windows/Linux)."""
+        try:
+            if os.name == 'nt':
+                numeric_id = "".join(filter(str.isdigit, job_id))
+                if not numeric_id:
+                    return False
+                cmd = ['wmic', 'printjob', 'where', f'jobid={numeric_id}', 'call', 'resume']
+            else:
+                cmd = ['lp', '-i', job_id, '-H', 'resume']
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+            
+            if process.returncode == 0:
+                logger.info(f"Resumed job: {job_id}")
+                return True
+            else:
+                logger.error(f"Failed to resume job {job_id}: {stderr.decode()}")
+                return False
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout resuming job {job_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Resume error: {e}")
             return False
 
     async def convert_to_pdf(self, file_path: str) -> Optional[str]:
@@ -140,7 +186,7 @@ class PrintManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate(timeout=120)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
             
             if process.returncode == 0 and os.path.exists(output_pdf):
                 return output_pdf
@@ -169,28 +215,40 @@ class PrintManager:
             # Use 'cmd /c start' or direct call if possible.
             # 'start /min' is safer for handling paths with spaces via the start command logic.
             if os.name == 'nt':
-                # Note: Windows print verb via 'start' is common for PDF/Images
-                # We use shell=False with explicit arguments.
-                cmd = ['cmd', '/c', 'start', '/min', '', '/b', str(path_obj)] 
-                # Better Windows approach without PS:
-                # cmd = ['powershell', '-NoProfile', '-Command', f"Start-Process -FilePath '{path_obj}' -Verb Print"]
-                # But start is even simpler.
+                # Modern Windows approach: Handle specific printer selection
+                # We use fuzzy matching to ensure "HP-LaserJet" matches "Hewlett-Packard..."
+                escaped_path = str(path_obj).replace("'", "''")
                 
-                # If we MUST use PowerShell, we pass it as an argument array, NOT a single command string
-                # cmd = ['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command', 'Start-Process', '-FilePath', str(path_obj), '-Verb', 'Print']
-                
-                # Switching to the most robust Windows native print command if available via ShellExecute
-                # but for CLI, 'cmd /c start' is a good fallback for images/docs.
-                # However, for production, usually 'lp' for Windows (if installed) or 'print' command.
-                # Use the user's version 4 recommendation:
-                cmd = ['cmd', '/c', 'start', '/min', '', str(path_obj)]
+                if selected_printer:
+                    escaped_printer = selected_printer.replace("'", "''")
+                    ps_command = (
+                        f"$n = '{escaped_printer}'; "
+                        f"$p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $n -or $_.Name -like \"*$n*\" }}; "
+                        f"if ($p -is [array]) {{ $p = $p[0] }}; "
+                        f"if ($p) {{ "
+                        f"  $p | Invoke-CimMethod -MethodName SetDefaultPrinter; "
+                        f"  Write-Output \"MATCHED_PRINTER: $($p.Name)\" "
+                        f"}}; "
+                        f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+                    )
+                else:
+                    ps_command = f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+
+                cmd = [
+                    'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                    '-Command', ps_command
+                ]
                 
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await process.communicate(timeout=60)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                
+                output = stdout.decode()
+                if "MATCHED_PRINTER:" in output:
+                    logger.info(f"Windows Print Success: {output.strip()}")
             
             # 3. Linux Hardening: LP with direct args
             else:
@@ -209,7 +267,7 @@ class PrintManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, stderr = await process.communicate(timeout=60)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
                 
                 if process.returncode != 0:
                     return f"❌ Print failed: {stderr.decode()}"

@@ -458,6 +458,7 @@ class PrinterBot:
                 "1": {"text": "Available Printers", "action": self.menu_show_printers},
                 "2": {"text": "Print Queue", "action": self.menu_show_queue},
                 "3": {"text": "Cancel Job", "action": self.menu_cancel_job},
+                "4": {"text": "Retry/Resume Job", "action": self.menu_retry_job},
                 "b": {"text": "◀ Back", "next_menu": "main"},
             },
         )
@@ -578,7 +579,7 @@ class PrinterBot:
             return "📠 No printers found."
 
         options = {}
-        for i, p in enumerate(printers[:10], 1):
+        for i, p in enumerate(printers[:20], 1):
             options[str(i)] = {
                 "text": p,
                 "action": "menu_set_printer",
@@ -607,7 +608,7 @@ class PrinterBot:
         current = (await storage.get_user_settings(user_id)).get("printer")
         current_text = f" (current: {current or 'Default'})"
 
-        printer_list = "\n".join([f"├─ {p}" for p in printers[:10]])
+        printer_list = "\n".join([f"├─ {p}" for p in printers[:20]])
         return f"📠 **Printers**{current_text}\n\n{printer_list}"
 
     async def menu_show_queue(self, user_id: str, room_id: str) -> str:
@@ -639,37 +640,68 @@ class PrinterBot:
         await self.dmc._display_menu(user_id, room_id, "cancel_select")
         return False
 
-    async def menu_cancel_selected_job(
-        self, user_id: str, room_id: str, job_id: str
-    ) -> str:
-        success = await self.cancel_print_job(job_id)
+    async def menu_retry_job(self, user_id: str, room_id: str) -> str:
+        """Show list of jobs to retry/resume"""
+        queue = await print_manager.get_print_queue()
+        if not queue:
+            return "📁 Print queue is empty."
+
+        options = {}
+        for i, q in enumerate(queue[:8], 1):
+            options[str(i)] = {
+                "text": f"🔄 Resume {q}",
+                "action": self.menu_retry_selected_job,
+                "args": {"job_id": q},
+            }
+
+        options["a"] = {"text": "🚀 Resume All Jobs", "action": self.menu_retry_all}
+        options["b"] = {"text": "◀ Back", "next_menu": "status_menu"}
+
+        self.dmc.register_callable_menu(
+            "retry_select", "🔧 Select Job to Resume", options
+        )
+        await self.dmc.set_user_menu(user_id, "retry_select")
+        await self.dmc._display_menu(user_id, room_id, "retry_select")
+        return False
+
+    async def menu_cancel_selected_job(self, user_id: str, room_id: str, job_id: str):
+        """Execute cancellation"""
+        # Fix: Route through print_manager
+        success = await print_manager.cancel_print_job(job_id)
         if success:
-            return f"✅ Successfully cancelled job: {job_id}"
-        return f"❌ Failed to cancel job {job_id}. It might have already printed."
+            return f"✅ Successfully cancelled: {job_id}"
+        return f"❌ Failed to cancel: {job_id}"
 
-    async def menu_cancel_all(self, user_id: str, room_id: str) -> str:
-        # Platform specific 'all' cancel logic
-        if os.name == "nt":
-            # Windows - wmic syntax for all
-            success = await self.cancel_print_job("*")
-            # Note: My implementation handles numeric IDs, let's refine it or loop.
-            # Actually, wmic delete handles 'all' if where clause matches all.
-            # Let's just loop for safety since we have the list.
-            queue = await self.get_print_queue()
-            for q in queue:
-                # Extract numeric part from #ID: Name
-                match = re.search(r"#(\d+)", q)
-                if match:
-                    await self.cancel_print_job(match.group(1))
-        else:
-            # Linux - cancel -a
-            try:
-                await asyncio.create_subprocess_exec("cancel", "-a")
-                return "✅ Successfully cancelled all print jobs."
-            except:
-                pass
+    async def menu_retry_selected_job(self, user_id: str, room_id: str, job_id: str):
+        """Execute resume"""
+        success = await print_manager.resume_print_job(job_id)
+        if success:
+            return f"✅ Successfully resumed: {job_id}"
+        return f"❌ Failed to resume: {job_id}"
 
-        return "✅ Cancel all command sent."
+    async def menu_cancel_all(self, user_id: str, room_id: str):
+        """Cancel all jobs in queue"""
+        queue = await print_manager.get_print_queue()
+        count = 0
+        for q in queue:
+            # Fix: Platform specific strings logic
+            match = re.search(r"#(\d+)", q) if os.name == 'nt' else (q, )
+            target_id = match.group(1) if os.name == 'nt' and match else q
+            if await print_manager.cancel_print_job(target_id):
+                count += 1
+        return f"🔥 Cancelled {count} jobs from queue."
+
+    async def menu_retry_all(self, user_id: str, room_id: str):
+        """Resume all jobs in queue"""
+        queue = await print_manager.get_print_queue()
+        count = 0
+        for q in queue:
+            match = re.search(r"#(\d+)", q) if os.name == 'nt' else (q, )
+            target_id = match.group(1) if os.name == 'nt' and match else q
+            if await print_manager.resume_print_job(target_id):
+                count += 1
+        return f"🚀 Resumed {count} jobs in queue."
+
 
     async def chat_bot(
         self,
