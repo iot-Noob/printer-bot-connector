@@ -1,22 +1,20 @@
 # Core dependencies
-rocketchat_API>=3.5.0
-rocketchat_async>=0.1.0
-websockets>=12.0
-httpx>=0.24.0
+rocketchat_API 
+rocketchat_async  
+websockets
+httpx
 
 # Configuration and validation
-pydantic>=2.0.0
-pydantic-settings>=2.0.0
-python-dotenv>=1.0.0
+pydantic 
+pydantic-settings 
+python-dotenv 
 
 # Printing
-universal-printer>=3.0.0
-
+universal-printer
 # PDF handling
-PyPDF2>=3.0.0
-
+PyPDF2
 # Async file operations
-aiofiles>=23.0.0
+aiofiles
 
 # Windows printer enumeration (optional)
 pywin32>=306; sys_platform == 'win32'

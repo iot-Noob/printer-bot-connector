@@ -19,9 +19,21 @@ except ImportError:
     METRICS_ENABLED = False
     # Dummy metrics
     class DummyMetric:
-        def inc(self, *args, **kwargs): pass
-        def observe(self, *args, **kwargs): pass
-        def set(self, *args, **kwargs): pass
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def labels(self, *args, **kwargs):
+            return self
+
+        def inc(self, *args, **kwargs):
+            pass
+
+        def observe(self, *args, **kwargs):
+            pass
+
+        def set(self, *args, **kwargs):
+            pass
+
     Counter = Histogram = Gauge = DummyMetric
 
 

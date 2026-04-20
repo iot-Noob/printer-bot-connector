@@ -1,4 +1,5 @@
 import asyncio
+import os
 import signal
 import logging
 import sys
@@ -8,14 +9,42 @@ from repository.PrinterBot import PrinterBot
 # RUN-TIME LOGGING SETUP
 # ============================================================================
 # Alex Chen Style: Structured, multi-handler, and informative.
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - [%(levelname)s] - %(name)s - %(message)s',
-    handlers=[
-        logging.FileHandler('printer_bot.log'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+if os.name == 'nt':
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleOutputCP(65001)
+        ctypes.windll.kernel32.SetConsoleCP(65001)
+    except Exception:
+        pass
+
+
+class UTF8ConsoleHandler(logging.StreamHandler):
+    """Custom handler that safely writes UTF-8 to Windows console"""
+    def emit(self, record):
+        try:
+            msg = self.format(record) + self.terminator
+            # Write UTF-8 directly to binary buffer
+            sys.stdout.buffer.write(msg.encode('utf-8', errors='replace'))
+            sys.stdout.buffer.flush()
+        except Exception:
+            self.handleError(record)
+
+
+# Configure handlers
+file_handler = logging.FileHandler('printer_bot.log', encoding='utf-8')
+console_handler = UTF8ConsoleHandler()
+formatter = logging.Formatter('%(asctime)s - [%(levelname)s] - %(name)s - %(message)s')
+
+file_handler.setFormatter(formatter)
+console_handler.setFormatter(formatter)
+
+# Configure root logger
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.handlers.clear()
+root_logger.addHandler(file_handler)
+root_logger.addHandler(console_handler)
+
 logger = logging.getLogger("main")
 
 async def main():
