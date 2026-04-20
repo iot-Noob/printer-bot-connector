@@ -172,28 +172,23 @@ class PrintManager:
             # Use 'cmd /c start' or direct call if possible.
             # 'start /min' is safer for handling paths with spaces via the start command logic.
             if os.name == 'nt':
-                # Note: Windows print verb via 'start' is common for PDF/Images
-                # We use shell=False with explicit arguments.
-                cmd = ['cmd', '/c', 'start', '/min', '', '/b', str(path_obj)] 
-                # Better Windows approach without PS:
-                # cmd = ['powershell', '-NoProfile', '-Command', f"Start-Process -FilePath '{path_obj}' -Verb Print"]
-                # But start is even simpler.
-                
-                # If we MUST use PowerShell, we pass it as an argument array, NOT a single command string
-                # cmd = ['powershell', '-NoProfile', '-WindowStyle', 'Hidden', '-Command', 'Start-Process', '-FilePath', str(path_obj), '-Verb', 'Print']
-                
-                # Switching to the most robust Windows native print command if available via ShellExecute
-                # but for CLI, 'cmd /c start' is a good fallback for images/docs.
-                # However, for production, usually 'lp' for Windows (if installed) or 'print' command.
-                # Use the user's version 4 recommendation:
-                cmd = ['cmd', '/c', 'start', '/min', '', str(path_obj)]
+                # Modern Windows approach: Use PowerShell 'Print' verb
+                # We use a single string for -Command to ensure robust argument parsing in PS
+                escaped_path = str(path_obj).replace("'", "''")
+                cmd = [
+                    'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
+                    '-Command', f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+                ]
                 
                 process = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await asyncio.wait_for(process.communicate(), timeout=60)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                
+                if process.returncode != 0:
+                    return f"❌ Windows Print failed: {stderr.decode()}"
             
             # 3. Linux Hardening: LP with direct args
             else:
