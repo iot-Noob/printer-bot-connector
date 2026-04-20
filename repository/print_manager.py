@@ -124,6 +124,39 @@ class PrintManager:
         except Exception as e:
             logger.error(f"Cancel error: {e}")
             return False
+    async def resume_print_job(self, job_id: str) -> bool:
+        """Force resume a print job by ID."""
+        try:
+            if os.name == 'nt':
+                # Sanitize: job_id should be numeric for wmic
+                numeric_id = "".join(filter(str.isdigit, job_id))
+                if not numeric_id:
+                    return False
+                # Use wmic to resume the job
+                cmd = ['wmic', 'printjob', 'where', f'jobid={numeric_id}', 'call', 'resume']
+            else:
+                # Linux - Use lp command with -H resume
+                cmd = ['lp', '-i', job_id, '-H', 'resume']
+
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+            
+            if process.returncode == 0:
+                logger.info(f"Resumed job: {job_id}")
+                return True
+            else:
+                logger.error(f"Failed to resume job {job_id}: {stderr.decode()}")
+                return False
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout resuming job {job_id}")
+            return False
+        except Exception as e:
+            logger.error(f"Resume error: {e}")
+            return False
 
     async def convert_to_pdf(self, file_path: str) -> Optional[str]:
         """Convert document to PDF using LibreOffice headlessly."""
@@ -172,12 +205,30 @@ class PrintManager:
             # Use 'cmd /c start' or direct call if possible.
             # 'start /min' is safer for handling paths with spaces via the start command logic.
             if os.name == 'nt':
-                # Modern Windows approach: Use PowerShell 'Print' verb
-                # We use a single string for -Command to ensure robust argument parsing in PS
+                # Modern Windows approach: Handle specific printer selection
+                # Note: Start-Process -Verb Print uses the default printer.
+                # To honor 'selected_printer', we temporarily set it as default via CIM.
                 escaped_path = str(path_obj).replace("'", "''")
+                
+                if selected_printer:
+                    escaped_printer = selected_printer.replace("'", "''")
+                    # Fuzzy match: match exact OR partial name to handle "HP LaserJet" vs "Hewlett-Packard..."
+                    ps_command = (
+                        f"$n = '{escaped_printer}'; "
+                        f"$p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $n -or $_.Name -like \"*$n*\" }}; "
+                        f"if ($p -is [array]) {{ $p = $p[0] }}; "
+                        f"if ($p) {{ "
+                        f"  $p | Invoke-CimMethod -MethodName SetDefaultPrinter; "
+                        f"  Write-Output \"MATCHED_PRINTER: $($p.Name)\" "
+                        f"}}; "
+                        f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+                    )
+                else:
+                    ps_command = f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+
                 cmd = [
                     'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                    '-Command', f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+                    '-Command', ps_command
                 ]
                 
                 process = await asyncio.create_subprocess_exec(
@@ -186,6 +237,10 @@ class PrintManager:
                     stderr=asyncio.subprocess.PIPE
                 )
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+                
+                output = stdout.decode()
+                if "MATCHED_PRINTER:" in output:
+                    logger.info(f"Windows Print Success: {output.strip()}")
                 
                 if process.returncode != 0:
                     return f"❌ Windows Print failed: {stderr.decode()}"
