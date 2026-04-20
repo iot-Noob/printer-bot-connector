@@ -110,7 +110,7 @@ class PrintManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate(timeout=10)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
             
             if process.returncode == 0:
                 logger.info(f"Cancelled job: {job_id}")
@@ -118,6 +118,9 @@ class PrintManager:
             else:
                 logger.error(f"Failed to cancel job {job_id}: {stderr.decode()}")
                 return False
+        except asyncio.TimeoutError:
+            logger.error(f"Timeout cancelling job {job_id}")
+            return False
         except Exception as e:
             logger.error(f"Cancel error: {e}")
             return False
@@ -140,7 +143,7 @@ class PrintManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate(timeout=120)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=120)
             
             if process.returncode == 0 and os.path.exists(output_pdf):
                 return output_pdf
@@ -190,7 +193,7 @@ class PrintManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                await process.communicate(timeout=60)
+                await asyncio.wait_for(process.communicate(), timeout=60)
             
             # 3. Linux Hardening: LP with direct args
             else:
@@ -209,7 +212,7 @@ class PrintManager:
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE
                 )
-                stdout, stderr = await process.communicate(timeout=60)
+                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
                 
                 if process.returncode != 0:
                     return f"❌ Print failed: {stderr.decode()}"
