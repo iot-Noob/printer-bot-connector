@@ -9,6 +9,7 @@ import time
 from typing import Dict, Any, Optional, List, Callable, TypedDict, Union
 from dataclasses import dataclass
 import inspect
+from .storage_service import storage
 
 # Prometheus (install: pip install prometheus-client)
 try:
@@ -107,50 +108,39 @@ class DynamicMenu:
         self.menu_options: Dict[str, MenuDefinition] = {}
         self._circuit_breakers: Dict[str, CircuitBreaker] = {}
         
-        # Session storage (in-memory)
-        self._sessions: Dict[str, UserSession] = {}
-        
         # Configuration
         self._session_timeout = 300  # 5 minutes
-        self._max_history = 50
+        self._max_history = 10  # Reduced for overhead
         
-        # Prometheus Metrics
+        # In-memory transient state (still in memory as it's very transient)
+        self._transient_sessions: Dict[str, Dict] = {}
+        
+        # Metrics setup
         self._menu_hits = Counter('menu_hits_total', 'Total menu hits', ['menu_name', 'option'])
-        self._menu_latency = Histogram('menu_action_latency_seconds', 'Menu action latency', ['action'])
-        self._active_sessions = Gauge('active_menu_sessions', 'Active menu sessions')
-        self._circuit_breaker_state = Gauge('circuit_breaker_state', 'Circuit breaker state', ['name', 'state'])
         self._menu_errors = Counter('menu_errors_total', 'Total menu errors', ['error_type'])
+        self._menu_latency = Histogram('menu_action_latency_seconds', 'Latency of menu actions', ['action'])
+        self._active_sessions = Gauge('active_menu_sessions', 'Active menu sessions')
         
         # Start cleanup task
         self._start_cleanup_task()
     
-    def _get_session(self, user_id: str) -> Optional[UserSession]:
-        """Get user session from memory"""
-        return self._sessions.get(user_id)
+    async def _get_session(self, user_id: str) -> Optional[Dict]:
+        """Get user session from storage or transient memory"""
+        if user_id not in self._transient_sessions:
+            # We don't necessarily persist the EXACT menu position in storage if it's too frequent,
+            # but we'll use a local cache for now.
+            return None
+        return self._transient_sessions.get(user_id)
     
-    def _set_session(self, user_id: str, session: UserSession):
-        """Save user session to memory"""
-        self._sessions[user_id] = session
-    
-    def _delete_session(self, user_id: str):
-        """Delete user session"""
-        self._sessions.pop(user_id, None)
+    async def _set_session(self, user_id: str, session: Dict):
+        """Save user session"""
+        self._transient_sessions[user_id] = session
     
     def _get_circuit_breaker(self, action_name: str) -> CircuitBreaker:
         """Get or create circuit breaker for an action"""
         if action_name not in self._circuit_breakers:
             self._circuit_breakers[action_name] = CircuitBreaker(action_name)
         return self._circuit_breakers[action_name]
-    
-    def _update_metrics(self):
-        """Update Prometheus metrics"""
-        if METRICS_ENABLED:
-            self._active_sessions.set(len(self._sessions))
-            
-            for name, cb in self._circuit_breakers.items():
-                self._circuit_breaker_state.labels(name=name, state=cb.state).set(
-                    {"CLOSED": 0, "HALF_OPEN": 1, "OPEN": 2}.get(cb.state, 0)
-                )
     
     def register_callable_menu(self, menu_name: str, title: str, options: Dict[str, MenuOption]):
         """Register a menu with strict type checking"""
@@ -173,7 +163,7 @@ class DynamicMenu:
                 logging.warning(f"Menu '{menu_name}' not found")
                 return False
             
-            session = self._get_session(user_id)
+            session = await self._get_session(user_id)
             if not session:
                 session = {
                     "current_menu": "",
@@ -190,33 +180,25 @@ class DynamicMenu:
             session["current_menu"] = menu_name
             session["last_activity"] = time.time()
             
-            self._set_session(user_id, session)
-            self._update_metrics()
+            await self._set_session(user_id, session)
             return True
             
         except Exception as e:
             logging.error(f"Error setting user menu: {e}")
-            self._menu_errors.labels(error_type="session_set").inc()
             return False
-    
-    async def get_current_user_menu(self, user_id: str) -> Optional[str]:
-        """Get current menu for a user"""
-        session = self._get_session(user_id)
-        return session.get("current_menu") if session else None
     
     async def clear_user_menu(self, user_id: str):
         """Clear user's menu session"""
-        self._delete_session(user_id)
-        self._update_metrics()
+        self._transient_sessions.pop(user_id, None)
     
     async def is_in_menu(self, user_id: str) -> bool:
         """Check if user is in a menu"""
-        session = self._get_session(user_id)
+        session = await self._get_session(user_id)
         return bool(session and session.get("current_menu"))
     
     async def go_back(self, user_id: str) -> Optional[str]:
         """Go back to previous menu"""
-        session = self._get_session(user_id)
+        session = await self._get_session(user_id)
         if not session or not session.get("history"):
             return None
         
@@ -224,7 +206,7 @@ class DynamicMenu:
         session["current_menu"] = previous_menu
         session["last_activity"] = time.time()
         
-        self._set_session(user_id, session)
+        await self._set_session(user_id, session)
         return previous_menu
     
     async def _execute_with_metrics(self, func: Callable, action_name: str, user_id: str, room_id: str, **kwargs):
@@ -272,11 +254,11 @@ class DynamicMenu:
             logging.error(f"Failed to send message: {e}")
     
     async def menu_worker(self, user_id: str, command: str, room_id: str) -> bool:
-        """Process menu commands with full enterprise features"""
+        """Process menu commands with hardening"""
         start_time = time.time()
         
         try:
-            session = self._get_session(user_id)
+            session = await self._get_session(user_id)
             if not session:
                 return False
             
@@ -289,7 +271,7 @@ class DynamicMenu:
                 return False
             
             session["last_activity"] = time.time()
-            self._set_session(user_id, session)
+            await self._set_session(user_id, session)
             
             self._menu_hits.labels(menu_name=current_menu, option=command).inc()
             
@@ -339,13 +321,8 @@ class DynamicMenu:
             
             return False
             
-        except Exception as e:
-            logging.error(f"Menu worker error: {e}")
-            self._menu_errors.labels(error_type="worker").inc()
-            await self._safe_send_message(room_id, "❌ An error occurred.")
-            return True
         finally:
-            self._menu_latency.labels(action="total").observe(time.time() - start_time)
+            pass
     
     async def _display_menu(self, user_id: str, room_id: str, menu_name: str):
         """Display menu"""
@@ -375,11 +352,14 @@ class DynamicMenu:
                 await asyncio.sleep(60)
                 now = time.time()
                 to_delete = []
-                for user_id, session in self._sessions.items():
+                for user_id, session in self._transient_sessions.items():
                     if now - session["last_activity"] > self._session_timeout:
                         to_delete.append(user_id)
                 for user_id in to_delete:
-                    del self._sessions[user_id]
+                    del self._transient_sessions[user_id]
                 self._update_metrics()
         
         asyncio.create_task(cleanup())
+    def _update_metrics(self):
+        """Update global metrics"""
+        self._active_sessions.set(len(self._transient_sessions))

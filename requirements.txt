@@ -2,7 +2,7 @@
 rocketchat_API>=3.5.0
 rocketchat_async>=0.1.0
 websockets>=12.0
-requests>=2.31.0
+httpx>=0.24.0
 
 # Configuration and validation
 pydantic>=2.0.0
@@ -12,8 +12,11 @@ python-dotenv>=1.0.0
 # Printing
 universal-printer>=3.0.0
 
-# PDF handling (optional - for page count)
+# PDF handling
 PyPDF2>=3.0.0
+
+# Async file operations
+aiofiles>=23.0.0
 
 # Windows printer enumeration (optional)
 pywin32>=306; sys_platform == 'win32'
