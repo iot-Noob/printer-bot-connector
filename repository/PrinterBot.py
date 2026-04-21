@@ -10,7 +10,6 @@ from datetime import datetime
 from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, HttpUrl
-from universal_printer import DocumentPrinter, UniversalPrinterError
 import httpx
 from .config import config
 from .storage_service import storage

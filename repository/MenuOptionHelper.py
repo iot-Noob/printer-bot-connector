@@ -348,18 +348,22 @@ class DynamicMenu:
             logging.error(f"Error displaying menu: {e}")
     
     def _start_cleanup_task(self):
-        """Start background cleanup task"""
+        """Start background cleanup task with hardening"""
         async def cleanup():
             while True:
-                await asyncio.sleep(60)
-                now = time.time()
-                to_delete = []
-                for user_id, session in self._transient_sessions.items():
-                    if now - session["last_activity"] > self._session_timeout:
-                        to_delete.append(user_id)
-                for user_id in to_delete:
-                    del self._transient_sessions[user_id]
-                self._update_metrics()
+                try:
+                    await asyncio.sleep(60)
+                    now = time.time()
+                    to_delete = []
+                    for user_id, session in self._transient_sessions.items():
+                        if now - session.get("last_activity", 0) > self._session_timeout:
+                            to_delete.append(user_id)
+                    for user_id in to_delete:
+                        del self._transient_sessions[user_id]
+                    self._update_metrics()
+                except Exception as e:
+                    logging.error(f"Menu cleanup error: {e}")
+                    await asyncio.sleep(10)
         
         asyncio.create_task(cleanup())
     def _update_metrics(self):
