@@ -8,7 +8,10 @@ from repository.PrinterBot import PrinterBot
 # ============================================================================
 # RUN-TIME LOGGING SETUP
 # ============================================================================
-# Alex Chen Style: Structured, multi-handler, and informative.
+# Clear any existing handlers (this kicks out VS Code's hidden crashy handlers)
+for h in logging.root.handlers[:]:
+    logging.root.removeHandler(h)
+
 # Alex Chen Style: Force UTF-8 for console and files to handle emojis on Windows
 if os.name == 'nt':
     import io
@@ -21,7 +24,7 @@ if os.name == 'nt':
         pass
 
 class SafeStreamHandler(logging.StreamHandler):
-    """Bypasses the standard logging emit to manually handle encoding errors on Windows."""
+    """Bypasses the standard logging emit and silences internal error blocks."""
     def emit(self, record):
         try:
             msg = self.format(record)
@@ -31,13 +34,15 @@ class SafeStreamHandler(logging.StreamHandler):
                 stream.write(msg + self.terminator)
             except (UnicodeEncodeError, BlockingIOError):
                 # Fallback: Force ASCII with replacements for the console
-                # This ensures zero crashes while preserving original logs in the file
                 safe_msg = msg.encode('ascii', 'replace').decode('ascii')
                 stream.write(safe_msg + self.terminator)
             self.flush()
         except:
-            # Ultimate safety: never allow a logging failure to stop the bot
             pass
+            
+    def handleError(self, record):
+        """Prevents '--- Logging error ---' tracebacks from ever appearing."""
+        pass
 
 logging.basicConfig(
     level=logging.INFO,
