@@ -8,11 +8,22 @@ from repository.PrinterBot import PrinterBot
 # RUN-TIME LOGGING SETUP
 # ============================================================================
 # Alex Chen Style: Structured, multi-handler, and informative.
+# Alex Chen Style: Force UTF-8 for console and files to handle emojis on Windows
+if os.name == 'nt':
+    import io
+    try:
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, 'reconfigure'):
+            sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, io.UnsupportedOperation):
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - %(name)s - %(message)s',
     handlers=[
-        logging.FileHandler('printer_bot.log'),
+        logging.FileHandler('printer_bot.log', encoding='utf-8'),
         logging.StreamHandler(sys.stdout)
     ]
 )
