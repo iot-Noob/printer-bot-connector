@@ -49,3 +49,4 @@ pip-wheel-metadata/
 /**downloads/**
 **.vscode/**
 test_local/**
+user_settings.json
