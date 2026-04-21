@@ -378,10 +378,11 @@ class PrinterBot:
                 "2": {"text": "Print Quality", "next_menu": "quality_menu"},
                 "3": {"text": "Color Mode", "next_menu": "color_menu"},
                 "4": {"text": "Copies", "action": self.menu_set_copies},
-                "5": {
+                "5": {"text": "Page Range", "action": self.menu_set_page_range},
+                "6": {
                     "text": "Select Printer",
                     "action": self.menu_select_printer,
-                },  # NEW
+                },
                 "b": {"text": "◀ Back", "next_menu": "main"},
             },
         )
@@ -565,6 +566,25 @@ class PrinterBot:
     async def menu_set_color(self, user_id: str, room_id: str, color: str) -> str:
         await self.update_user_settings(user_id, "color", color)
         return f"✅ Color mode set to: {color}"
+
+    async def menu_set_page_range(self, sender_id: str, room_id: str):
+        """Input flow for setting page range."""
+        await self.rocket.send_message(
+            "📄 *Set Page Range*\n"
+            "Examples: `1-5`, `1,3,5`, or type `all` to print everything.\n"
+            "Just type the range now:",
+            room_id
+        )
+
+    async def _handle_page_range_input(self, sender_id: str, text: str, room_id: str):
+        """Handle the actual numeric input for page range."""
+        range_val = text.strip().lower()
+        if range_val == "all" or re.match(r'^[\d\-,\s]+$', range_val):
+            await self.update_user_settings(sender_id, "page_range", range_val)
+            await self.rocket.send_message(f"✅ Page Range set to: *{range_val}*", room_id)
+            await self.dmc.display_menu(sender_id, room_id, "settings_menu")
+        else:
+            await self.rocket.send_message("❌ Invalid range format. Use `1-5`, `1,3` or `all`.", room_id)
 
     async def menu_set_copies(self, user_id: str, room_id: str) -> str:
         return "📊 Enter number of copies (1-99):"
@@ -781,18 +801,23 @@ class PrinterBot:
                         f"├─ Quality: {settings['quality']}\n"
                         f"├─ Color: {settings['color']}\n"
                         f"├─ Copies: {settings['copies']}\n"
+                        f"├─ Range: {settings.get('page_range', 'all')}\n"
                         f"├─ Printer: {selected_printer}\n"
                         f"└─ Connected: ✅",
                         room_id,
                     )
                     return
-
                 # Copies shortcut
                 if command.isdigit() and 1 <= int(command) <= self.config.max_copies:
                     await self.update_user_settings(sender_id, "copies", int(command))
                     await self.rocket.send_message(
                         f"✅ Copies set to: {command}", room_id
                     )
+                    return
+
+                # Page Range shortcut (e.g. 1-5, 1,3 or all)
+                if "-" in command or "," in command or command == "all":
+                    await self._handle_page_range_input(sender_id, command, room_id)
                     return
 
                 await self.rocket.send_message(

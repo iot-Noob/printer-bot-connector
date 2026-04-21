@@ -201,86 +201,157 @@ class PrintManager:
             return None
 
     async def print_file(self, file_path: str, settings: Dict, page_range: Optional[str] = None) -> str:
-        """Execute print command with security hardening."""
+        """Execute print command with specialized engines for Word, Excel, and PDF."""
         try:
-            # 1. Path Security: Sanitize and resolve
             path_obj = Path(file_path).resolve()
             if not path_obj.exists():
                 return f"❌ File not found: {path_obj.name}"
 
             copies = min(settings.get("copies", 1), self.max_copies)
             selected_printer = settings.get("printer")
-            
-            # 2. Windows Hardening: Skip PowerShell string interpolation
-            # Use 'cmd /c start' or direct call if possible.
-            # 'start /min' is safer for handling paths with spaces via the start command logic.
-            if os.name == 'nt':
-                # Modern Windows approach: Handle specific printer selection
-                # We use fuzzy matching to ensure "HP-LaserJet" matches "Hewlett-Packard..."
-                escaped_path = str(path_obj).replace("'", "''")
-                
-                if selected_printer:
-                    escaped_printer = selected_printer.replace("'", "''")
-                    ps_command = (
-                        f"$n = '{escaped_printer}'; "
-                        f"$p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $n -or $_.Name -like \"*$n*\" }}; "
-                        f"if ($p -is [array]) {{ $p = $p[0] }}; "
-                        f"if ($p) {{ "
-                        f"  $p | Invoke-CimMethod -MethodName SetDefaultPrinter; "
-                        f"  Write-Output \"MATCHED_PRINTER: $($p.Name)\" "
-                        f"}}; "
-                        f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
-                    )
-                else:
-                    ps_command = f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+            # Normalize range: empty or "all" -> None (print all)
+            p_range = None if not page_range or page_range.lower() == "all" else page_range.strip()
 
-                cmd = [
-                    'powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass',
-                    '-Command', ps_command
-                ]
+            if os.name == 'nt':
+                ext = path_obj.suffix.lower()
                 
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
-                
-                output = stdout.decode()
-                if "MATCHED_PRINTER:" in output:
-                    logger.info(f"Windows Print Success: {output.strip()}")
-            
-            # 3. Linux Hardening: LP with direct args
+                # SPECIALIZED ENGINES FOR WINDOWS
+                if ext == ".pdf":
+                    return await self._print_pdf_windows(str(path_obj), selected_printer, p_range, copies)
+                elif ext in [".docx", ".doc"]:
+                    return await self._print_word_windows(str(path_obj), selected_printer, p_range, copies)
+                elif ext in [".xlsx", ".xls"]:
+                    return await self._print_excel_windows(str(path_obj), selected_printer, p_range, copies)
+                else:
+                    return await self._print_generic_windows(str(path_obj), selected_printer, p_range, copies)
+
+            # LINUX LOGIC (Standard LP)
             else:
                 cmd = ['lp']
                 if selected_printer:
                     cmd.extend(['-d', selected_printer])
                 if copies > 1:
                     cmd.extend(['-n', str(copies)])
-                if page_range and re.match(r'^\d+-\d+$', page_range):
-                    cmd.extend(['-o', f'page-ranges={page_range}'])
+                if p_range and re.match(r'^\d+(-\d+)?$', p_range):
+                    cmd.extend(['-o', f'page-ranges={p_range}'])
                 
                 cmd.append(str(path_obj))
-                
-                process = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE
-                )
+                process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
                 
                 if process.returncode != 0:
                     return f"❌ Print failed: {stderr.decode()}"
-            
-            printer_text = f" to {selected_printer}" if selected_printer else ""
-            copy_text = f" ({copies} copies)" if copies > 1 else ""
-            return f"✅ Printed: {path_obj.name}{copy_text}{printer_text}"
+                return f"✅ Printed: {path_obj.name}"
 
-        except asyncio.TimeoutError:
-            return f"❌ Print timeout for {os.path.basename(file_path)}"
         except Exception as e:
             logger.error(f"Print error: {e}")
             return f"❌ Print error: {e}"
+
+    async def _print_pdf_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
+        """Prints PDF using SumatraPDF if available, else Edge."""
+        sumatra_path = Path("bin/SumatraPDF.exe").resolve()
+        
+        if sumatra_path.exists():
+            # SILENT SUMATRA PRINT
+            cmd_printer = f'-print-to "{printer}"' if printer else '-print-to-default'
+            cmd_range = f'-print-settings "{p_range}"' if p_range else ''
+            
+            ps_cmd = f'& "{sumatra_path}" -silent {cmd_printer} {cmd_range} "{file_path}"'
+            return await self._run_powershell(ps_cmd, "PDF (Sumatra)")
+        else:
+            # FALLBACK TO EDGE (May pop up briefly)
+            logger.warning("SumatraPDF not found in bin/, falling back to Edge.")
+            p_option = f'-PrinterName "{printer}"' if printer else ''
+            ps_cmd = f'Start-Process -FilePath "{file_path}" -Verb Print -WindowStyle Hidden'
+            return await self._run_powershell(ps_cmd, "PDF (Shell)")
+
+    async def _print_word_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
+        """Prints Word docs using COM Automation (Totally Headless)."""
+        printer_select = f'$word.ActivePrinter = "{printer}"' if printer else ''
+        
+        # Range handling logic for Word
+        if p_range and '-' in p_range:
+            p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
+            print_cmd = f'$doc.PrintOut($false, $false, 3, $null, "{p_from}", "{p_to}", $null, {copies})'
+        else:
+            print_cmd = f'$doc.PrintOut($false, $false, 0, $null, $null, $null, $null, {copies})'
+
+        ps_script = f"""
+        try {{
+            $word = New-Object -ComObject Word.Application
+            $word.Visible = $false
+            {printer_select}
+            $doc = $word.Documents.Open("{file_path}", $false, $true)
+            {print_cmd}
+            $doc.Close($false)
+            $word.Quit()
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Error $_.Exception.Message
+            if($word) {{ $word.Quit() }}
+        }}
+        """
+        return await self._run_powershell(ps_script, "Word (COM)")
+
+    async def _print_excel_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
+        """Prints Excel docs using COM Automation (Totally Headless)."""
+        # Range handling logic for Excel
+        if p_range and '-' in p_range:
+            p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
+            print_cmd = f'$wb.PrintOut({p_from}, {p_to}, {copies}, $false, "{printer}")'
+        else:
+            print_cmd = f'$wb.PrintOut($null, $null, {copies}, $false, "{printer}")'
+
+        ps_script = f"""
+        try {{
+            $xl = New-Object -ComObject Excel.Application
+            $xl.Visible = $false
+            $xl.DisplayAlerts = $false
+            $wb = $xl.Workbooks.Open("{file_path}")
+            {print_cmd}
+            $wb.Close($false)
+            $xl.Quit()
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Error $_.Exception.Message
+            if($xl) {{ $xl.Quit() }}
+        }}
+        """
+        return await self._run_powershell(ps_script, "Excel (COM)")
+
+    async def _print_generic_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
+        """Fallback for images, txt, etc."""
+        # Note: standard shell print doesn't support ranges easily
+        escaped_path = file_path.replace("'", "''")
+        if printer:
+            escaped_printer = printer.replace("'", "''")
+            ps_cmd = (
+                f"$n = '{escaped_printer}'; "
+                f"$p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $n -or $_.Name -like \"*$n*\" }}; "
+                f"if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}; "
+                f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+            )
+        else:
+            ps_cmd = f"Start-Process -FilePath '{escaped_path}' -Verb Print -WindowStyle Hidden"
+        
+        return await self._run_powershell(ps_cmd, "Shell (Generic)")
+
+    async def _run_powershell(self, command: str, engine_name: str) -> str:
+        """Helper to run powershell commands safely."""
+        try:
+            cmd = ['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-Command', command]
+            process = await asyncio.create_subprocess_exec(*cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=90)
+            
+            if process.returncode == 0:
+                logger.info(f"{engine_name} print successful")
+                return f"✅ Print successful via {engine_name}"
+            else:
+                err = stderr.decode().strip() or stdout.decode().strip()
+                logger.error(f"{engine_name} print failed: {err}")
+                return f"❌ {engine_name} Error: {err[:100]}"
+        except Exception as e:
+            return f"❌ {engine_name} System Error: {e}"
 
 # Singleton
 print_manager = PrintManager()
