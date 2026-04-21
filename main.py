@@ -14,18 +14,31 @@ if os.name == 'nt':
     import io
     try:
         if hasattr(sys.stdout, 'reconfigure'):
-            sys.stdout.reconfigure(encoding='utf-8')
+            sys.stdout.reconfigure(encoding='utf-8', errors='replace')
         if hasattr(sys.stderr, 'reconfigure'):
-            sys.stderr.reconfigure(encoding='utf-8')
+            sys.stderr.reconfigure(encoding='utf-8', errors='replace')
     except (AttributeError, io.UnsupportedOperation):
         pass
+
+class SafeStreamHandler(logging.StreamHandler):
+    """Logging handler that prevents Unicode crashes on old Windows terminals."""
+    def emit(self, record):
+        try:
+            super().emit(record)
+        except (UnicodeEncodeError, BlockingIOError):
+            try:
+                msg = self.format(record)
+                self.stream.write(msg.encode('ascii', 'replace').decode('ascii') + self.terminator)
+                self.flush()
+            except:
+                pass
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - [%(levelname)s] - %(name)s - %(message)s',
     handlers=[
         logging.FileHandler('printer_bot.log', encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
+        SafeStreamHandler(sys.stdout)
     ]
 )
 logger = logging.getLogger("main")

@@ -26,6 +26,8 @@ except ImportError:
         def set(self, *args, **kwargs): pass
     Counter = Histogram = Gauge = DummyMetric
 
+logger = logging.getLogger("repository.MenuOptionHelper")
+
 
 # ============ Strict Typing ============
 
@@ -70,14 +72,14 @@ class CircuitBreaker:
         
         if self._failures >= self.failure_threshold:
             self._state = "OPEN"
-            logging.warning(f"Circuit breaker '{self.name}' OPEN after {self._failures} failures")
+            logger.warning(f"Circuit breaker '{self.name}' OPEN after {self._failures} failures")
     
     def record_success(self):
         """Record a success"""
         if self._state == "HALF_OPEN":
             self._state = "CLOSED"
             self._failures = 0
-            logging.info(f"Circuit breaker '{self.name}' CLOSED (recovered)")
+            logger.info(f"Circuit breaker '{self.name}' CLOSED (recovered)")
         elif self._state == "CLOSED":
             self._failures = max(0, self._failures - 1)
     
@@ -89,7 +91,7 @@ class CircuitBreaker:
         if self._state == "OPEN":
             if time.time() - self._last_failure_time > self.recovery_timeout:
                 self._state = "HALF_OPEN"
-                logging.info(f"Circuit breaker '{self.name}' HALF_OPEN (testing)")
+                logger.info(f"Circuit breaker '{self.name}' HALF_OPEN (testing)")
                 return True
             return False
         
@@ -152,17 +154,17 @@ class DynamicMenu:
                     raise TypeError(f"Option '{key}' must be dict, got {type(opt)}")
             
             self.menu_options[menu_name] = {"title": title, "options": options}
-            logging.info(f"Menu registered: {menu_name} - {title}")
+            logger.info(f"Menu registered: {menu_name} - {title}")
             return self
         except Exception as e:
-            logging.error(f"Failed to register menu {menu_name}: {e}")
+            logger.error(f"Failed to register menu {menu_name}: {e}")
             raise
     
     async def set_user_menu(self, user_id: str, menu_name: str, save_history: bool = True) -> bool:
         """Set current menu for a user"""
         try:
             if menu_name not in self.menu_options:
-                logging.warning(f"Menu '{menu_name}' not found")
+                logger.warning(f"Menu '{menu_name}' not found")
                 return False
             
             session = await self._get_session(user_id)
@@ -186,7 +188,7 @@ class DynamicMenu:
             return True
             
         except Exception as e:
-            logging.error(f"Error setting user menu: {e}")
+            logger.error(f"Error setting user menu: {e}")
             return False
     
     async def clear_user_menu(self, user_id: str):
@@ -244,7 +246,7 @@ class DynamicMenu:
         except Exception as e:
             cb.record_failure()
             self._menu_errors.labels(error_type="execution").inc()
-            logging.error(f"Error in {action_name}: {e}")
+            logger.error(f"Error in {action_name}: {e}")
             await self._safe_send_message(room_id, f"❌ Error: {str(e)[:100]}")
             return None
     
@@ -253,11 +255,12 @@ class DynamicMenu:
         try:
             await self.bot.rocket.send_message(message, room_id)
         except Exception as e:
-            logging.error(f"Failed to send message: {e}")
+            logger.error(f"Failed to send message: {e}")
     
     async def menu_worker(self, user_id: str, command: str, room_id: str) -> bool:
         """Process menu commands with hardening"""
         start_time = time.time()
+        command = command.strip().lower()
         
         try:
             session = await self._get_session(user_id)
@@ -345,7 +348,7 @@ class DynamicMenu:
             await self._safe_send_message(room_id, message)
             
         except Exception as e:
-            logging.error(f"Error displaying menu: {e}")
+            logger.error(f"Error displaying menu: {e}")
     
     def _start_cleanup_task(self):
         """Start background cleanup task with hardening"""
@@ -362,7 +365,7 @@ class DynamicMenu:
                         del self._transient_sessions[user_id]
                     self._update_metrics()
                 except Exception as e:
-                    logging.error(f"Menu cleanup error: {e}")
+                    logger.error(f"Menu cleanup error: {e}")
                     await asyncio.sleep(10)
         
         asyncio.create_task(cleanup())
