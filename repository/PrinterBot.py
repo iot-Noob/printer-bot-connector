@@ -294,6 +294,26 @@ class PrinterBot:
                 logger.error(f"Download error: {e}")
                 return None
 
+    async def _handle_file_arrival(self, image_link, title, sender_id, room_id, msg_id):
+        """Internal helper to handle download + auto-prompt for seamless UX."""
+        try:
+            local_path = await self.download_file(
+                image_link, title, user_data={"sender_id": sender_id}
+            )
+
+            if local_path:
+                self.pending_jobs[sender_id] = {
+                    "file_path": local_path,
+                    "filename": title,
+                }
+                await self.rocket.send_message(
+                    f"✅ **{title}** is ready!\n"
+                    "🖨️ Type `all` to print, or a range like `1-2` (or ignore).",
+                    room_id,
+                )
+        except Exception as e:
+            logger.error(f"Error in file arrival: {e}")
+
     async def get_user_settings(self, user_id: str) -> dict:
         return await storage.get_user_settings(user_id)
 
@@ -326,25 +346,10 @@ class PrinterBot:
     async def print_file(
         self, file_path: str, user_id: str, page_range: str = None
     ) -> str:
-        """Isolated print logic."""
+        """Isolated print logic – now directly passing files to the Universal Engine."""
         settings = await storage.get_user_settings(user_id)
-        file_type = self.get_file_type(file_path)
-
-        pdf_path = None
-        if file_type in ["word", "excel", "powerpoint"]:
-            pdf_path = await print_manager.convert_to_pdf(file_path)
-            if not pdf_path:
-                return f"❌ Conversion failed for {os.path.basename(file_path)}"
-            print_file_path = pdf_path
-        else:
-            print_file_path = file_path
-
-        result = await print_manager.print_file(print_file_path, settings, page_range)
-
-        if pdf_path and os.path.exists(pdf_path):
-            await asyncio.to_thread(os.remove, pdf_path)
-
-        return result
+        # We no longer convert to PDF here as print_manager handles Word/Excel natively
+        return await print_manager.print_file(file_path, settings, page_range)
 
     def _register_menus(self):
         self.dmc.register_callable_menu(
@@ -727,16 +732,10 @@ class PrinterBot:
 
                 await self.rocket.send_message(f"📥 Receiving: {title}", room_id)
 
+                # Use a wrapper to handle the download and the subsequent prompt
                 asyncio.create_task(
-                    self.download_file(
-                        image_link,
-                        title,
-                        user_data={
-                            "name": sender,
-                            "message_id": msg_id,
-                            "room_id": room_id,
-                            "sender_id": sender_id,
-                        },
+                    self._handle_file_arrival(
+                        image_link, title, sender_id, room_id, msg_id
                     )
                 )
 
