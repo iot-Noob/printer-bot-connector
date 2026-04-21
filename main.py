@@ -21,17 +21,23 @@ if os.name == 'nt':
         pass
 
 class SafeStreamHandler(logging.StreamHandler):
-    """Logging handler that prevents Unicode crashes on old Windows terminals."""
+    """Bypasses the standard logging emit to manually handle encoding errors on Windows."""
     def emit(self, record):
         try:
-            super().emit(record)
-        except (UnicodeEncodeError, BlockingIOError):
+            msg = self.format(record)
+            stream = self.stream
             try:
-                msg = self.format(record)
-                self.stream.write(msg.encode('ascii', 'replace').decode('ascii') + self.terminator)
-                self.flush()
-            except:
-                pass
+                # Try printing normally first
+                stream.write(msg + self.terminator)
+            except (UnicodeEncodeError, BlockingIOError):
+                # Fallback: Force ASCII with replacements for the console
+                # This ensures zero crashes while preserving original logs in the file
+                safe_msg = msg.encode('ascii', 'replace').decode('ascii')
+                stream.write(safe_msg + self.terminator)
+            self.flush()
+        except:
+            # Ultimate safety: never allow a logging failure to stop the bot
+            pass
 
 logging.basicConfig(
     level=logging.INFO,
