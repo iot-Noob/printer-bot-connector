@@ -222,6 +222,8 @@ class PrintManager:
                     return await self._print_word_windows(str(path_obj), selected_printer, p_range, copies)
                 elif ext in [".xlsx", ".xls"]:
                     return await self._print_excel_windows(str(path_obj), selected_printer, p_range, copies)
+                elif ext in [".png", ".jpg", ".jpeg", ".bmp"]:
+                    return await self._print_image_windows(str(path_obj), selected_printer)
                 else:
                     return await self._print_generic_windows(str(path_obj), selected_printer, p_range, copies)
 
@@ -259,16 +261,29 @@ class PrintManager:
             ps_cmd = f'& "{sumatra_path}" -silent {cmd_printer} {cmd_range} "{file_path}"'
             return await self._run_powershell(ps_cmd, "PDF (Sumatra)")
         else:
-            # FALLBACK TO EDGE (May pop up briefly)
-            logger.warning("SumatraPDF not found in bin/, falling back to Edge.")
-            p_option = f'-PrinterName "{printer}"' if printer else ''
-            ps_cmd = f'Start-Process -FilePath "{file_path}" -Verb Print -WindowStyle Hidden'
-            return await self._run_powershell(ps_cmd, "PDF (Shell)")
+            # FALLBACK TO EDGE (Requires Default Swap for reliability)
+            logger.warning("SumatraPDF not found in bin/, falling back to Edge with System Swap.")
+            ps_script = f"""
+            $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
+            $target = "{printer}"
+            try {{
+                if ($target) {{
+                    $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
+                    if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+                }}
+                Start-Process -FilePath "{file_path}" -Verb Print -WindowStyle Hidden
+                Start-Sleep -Seconds 2
+            }} finally {{
+                if ($oldP) {{
+                    $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
+                    if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+                }}
+            }}
+            """
+            return await self._run_powershell(ps_script, "PDF (Shell-Swap)")
 
     async def _print_word_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
-        """Prints Word docs using COM Automation (Totally Headless). Semplicemente magico."""
-        printer_select = f'$word.ActivePrinter = "{printer}"' if printer else ''
-        
+        """Prints Word docs using 'System Swap' logic for rock-solid reliability."""
         # Range handling logic for Word
         if p_range and '-' in p_range:
             p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
@@ -277,47 +292,119 @@ class PrintManager:
             print_cmd = f'$doc.PrintOut($false, $false, 0, $null, $null, $null, $null, {copies})'
 
         ps_script = f"""
+        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
+        $target = "{printer}"
         try {{
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
+                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
+            
             $word = New-Object -ComObject Word.Application
             $word.Visible = $false
-            {printer_select}
             $doc = $word.Documents.Open("{file_path}", $false, $true)
             {print_cmd}
+            
+            # Wait for spooler to receive document
+            while($word.BackgroundPrintingStatus -gt 0) {{ Start-Sleep -Milliseconds 250 }}
+            
             $doc.Close($false)
             $word.Quit()
             Write-Output "SUCCESS"
         }} catch {{
             Write-Error $_.Exception.Message
             if($word) {{ $word.Quit() }}
+        }} finally {{
+            if ($oldP) {{
+                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
+                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
         }}
         """
-        return await self._run_powershell(ps_script, "Word (COM)")
+        return await self._run_powershell(ps_script, "Word (Direct-Swap)")
 
     async def _print_excel_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
-        """Prints Excel docs using COM Automation (Totally Headless)."""
+        """Prints Excel docs using 'System Swap' logic."""
         # Range handling logic for Excel
         if p_range and '-' in p_range:
             p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
-            print_cmd = f'$wb.PrintOut({p_from}, {p_to}, {copies}, $false, "{printer}")'
+            print_cmd = f'$wb.PrintOut({p_from}, {p_to}, {copies}, $false)'
         else:
-            print_cmd = f'$wb.PrintOut($null, $null, {copies}, $false, "{printer}")'
+            print_cmd = f'$wb.PrintOut($null, $null, {copies}, $false)'
 
         ps_script = f"""
+        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
+        $target = "{printer}"
         try {{
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
+                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
+            
             $xl = New-Object -ComObject Excel.Application
             $xl.Visible = $false
             $xl.DisplayAlerts = $false
             $wb = $xl.Workbooks.Open("{file_path}")
             {print_cmd}
+            
+            # Excel doesn't have BackgroundPrintingStatus, but the $false flag above
+            # makes PrintOut synchronous. We add a small buffer for safety.
+            Start-Sleep -Seconds 1
+            
             $wb.Close($false)
             $xl.Quit()
             Write-Output "SUCCESS"
         }} catch {{
             Write-Error $_.Exception.Message
             if($xl) {{ $xl.Quit() }}
+        }} finally {{
+            if ($oldP) {{
+                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
+                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
         }}
         """
-        return await self._run_powershell(ps_script, "Excel (COM)")
+        return await self._run_powershell(ps_script, "Excel (Direct-Swap)")
+
+    async def _print_image_windows(self, file_path: str, printer: Optional[str]) -> str:
+        """Prints images using 'System Swap' logic + .NET PrintDocument."""
+        ps_script = f"""
+        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
+        $target = "{printer}"
+        try {{
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
+                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
+            
+            Add-Type -AssemblyName System.Drawing
+            $file = "{file_path}"
+            $pd = New-Object System.Drawing.Printing.PrintDocument
+            $pd.DocumentName = (Split-Path $file -Leaf)
+            $image = [System.Drawing.Image]::FromFile($file)
+            $pd.add_PrintPage({{
+                $rect = $_.MarginBounds
+                if ($image.Width / $image.Height -gt $rect.Width / $rect.Height) {{
+                    $rect.Height = $image.Height * ($rect.Width / $image.Width)
+                }} else {{
+                    $rect.Width = $image.Width * ($rect.Height / $image.Height)
+                }}
+                $_.Graphics.DrawImage($image, $rect)
+            }})
+            $pd.Print()
+            $image.Dispose()
+            Write-Output "SUCCESS"
+        }} catch {{
+            Write-Error $_.Exception.Message
+            if ($image) {{ $image.Dispose() }}
+        }} finally {{
+            if ($oldP) {{
+                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
+                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
+            }}
+        }}
+        """
+        return await self._run_powershell(ps_script, "Image (Direct-Swap)")
 
     async def _print_generic_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
         """Fallback for images, txt, etc."""
