@@ -283,7 +283,7 @@ class PrintManager:
             return await self._run_powershell(ps_script, "PDF (Shell-Swap)")
 
     async def _print_word_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
-        """Prints Word docs using 'System Swap' logic for rock-solid reliability."""
+        """Prints Word docs using Precision Targeting (Printer Name + Port)."""
         # Range handling logic for Word
         if p_range and '-' in p_range:
             p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
@@ -292,16 +292,23 @@ class PrintManager:
             print_cmd = f'$doc.PrintOut($false, $false, 0, $null, $null, $null, $null, {copies})'
 
         ps_script = f"""
-        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
         $target = "{printer}"
         try {{
-            if ($target) {{
-                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
-                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
-            
             $word = New-Object -ComObject Word.Application
             $word.Visible = $false
+            
+            # Precision Targeting: Find the exact Name + Port string Word requires
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ 
+                    ($_.Name -eq $target -or $_.Name -like "*$target*") -and 
+                    ($_.Name -notlike "*OneNote*" -and $_.Name -notlike "*Fax*" -and $_.Name -notlike "*PDF*")
+                }} | Select-Object -First 1
+                
+                if ($p) {{
+                    $word.ActivePrinter = "$($p.Name) on $($p.PortName)"
+                }}
+            }}
+            
             $doc = $word.Documents.Open("{file_path}", $false, $true)
             {print_cmd}
             
@@ -314,17 +321,12 @@ class PrintManager:
         }} catch {{
             Write-Error $_.Exception.Message
             if($word) {{ $word.Quit() }}
-        }} finally {{
-            if ($oldP) {{
-                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
-                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
         }}
         """
-        return await self._run_powershell(ps_script, "Word (Direct-Swap)")
+        return await self._run_powershell(ps_script, "Word (Precision)")
 
     async def _print_excel_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
-        """Prints Excel docs using 'System Swap' logic."""
+        """Prints Excel docs using Precision Targeting."""
         # Range handling logic for Excel
         if p_range and '-' in p_range:
             p_from, p_to = p_range.split('-')[0], p_range.split('-')[1]
@@ -333,23 +335,29 @@ class PrintManager:
             print_cmd = f'$wb.PrintOut($null, $null, {copies}, $false)'
 
         ps_script = f"""
-        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
         $target = "{printer}"
         try {{
-            if ($target) {{
-                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
-                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
-            
             $xl = New-Object -ComObject Excel.Application
             $xl.Visible = $false
             $xl.DisplayAlerts = $false
+            
+            # Precision Targeting for Excel
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ 
+                    ($_.Name -eq $target -or $_.Name -like "*$target*") -and 
+                    ($_.Name -notlike "*OneNote*" -and $_.Name -notlike "*Fax*" -and $_.Name -notlike "*PDF*")
+                }} | Select-Object -First 1
+                
+                if ($p) {{
+                    $xl.ActivePrinter = "$($p.Name) on $($p.PortName)"
+                }}
+            }}
+
             $wb = $xl.Workbooks.Open("{file_path}")
             {print_cmd}
             
-            # Excel doesn't have BackgroundPrintingStatus, but the $false flag above
-            # makes PrintOut synchronous. We add a small buffer for safety.
-            Start-Sleep -Seconds 1
+            # Synchronous wait buffer
+            Start-Sleep -Seconds 2
             
             $wb.Close($false)
             $xl.Quit()
@@ -357,29 +365,31 @@ class PrintManager:
         }} catch {{
             Write-Error $_.Exception.Message
             if($xl) {{ $xl.Quit() }}
-        }} finally {{
-            if ($oldP) {{
-                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
-                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
         }}
         """
-        return await self._run_powershell(ps_script, "Excel (Direct-Swap)")
+        return await self._run_powershell(ps_script, "Excel (Precision)")
 
     async def _print_image_windows(self, file_path: str, printer: Optional[str]) -> str:
-        """Prints images using 'System Swap' logic + .NET PrintDocument."""
+        """Prints images using Precision Targeting + .NET PrintDocument."""
         ps_script = f"""
-        $oldP = (Get-CimInstance Win32_Printer | Where-Object {{ $_.Default -eq $true }}).Name
         $target = "{printer}"
         try {{
-            if ($target) {{
-                $p = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $target -or $_.Name -like "*$target*" }} | Select-Object -First 1
-                if ($p) {{ $p | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
-            
             Add-Type -AssemblyName System.Drawing
             $file = "{file_path}"
             $pd = New-Object System.Drawing.Printing.PrintDocument
+            
+            # Precision Targeting for Images
+            if ($target) {{
+                $p = Get-CimInstance Win32_Printer | Where-Object {{ 
+                    ($_.Name -eq $target -or $_.Name -like "*$target*") -and 
+                    ($_.Name -notlike "*OneNote*" -and $_.Name -notlike "*Fax*" -and $_.Name -notlike "*PDF*")
+                }} | Select-Object -First 1
+                
+                if ($p) {{
+                    $pd.PrinterSettings.PrinterName = $p.Name
+                }}
+            }}
+
             $pd.DocumentName = (Split-Path $file -Leaf)
             $image = [System.Drawing.Image]::FromFile($file)
             $pd.add_PrintPage({{
@@ -397,14 +407,9 @@ class PrintManager:
         }} catch {{
             Write-Error $_.Exception.Message
             if ($image) {{ $image.Dispose() }}
-        }} finally {{
-            if ($oldP) {{
-                $rest = Get-CimInstance Win32_Printer | Where-Object {{ $_.Name -eq $oldP }}
-                if ($rest) {{ $rest | Invoke-CimMethod -MethodName SetDefaultPrinter }}
-            }}
         }}
         """
-        return await self._run_powershell(ps_script, "Image (Direct-Swap)")
+        return await self._run_powershell(ps_script, "Image (Precision)")
 
     async def _print_generic_windows(self, file_path: str, printer: Optional[str], p_range: Optional[str], copies: int) -> str:
         """Fallback for images, txt, etc."""
