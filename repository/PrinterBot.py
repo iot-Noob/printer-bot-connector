@@ -13,7 +13,11 @@ from pydantic import Field, HttpUrl
 import httpx
 from .config import config
 from .storage_service import storage
-from .print_manager import print_manager
+from .print_manager import (
+    print_manager,
+    CONVERT_TO_PDF_EXTENSIONS,
+    sibling_pdf_if_any,
+)
 import logging
 import signal
 import re
@@ -593,7 +597,7 @@ class PrinterBot:
         return "📊 Enter number of copies (1-99):"
 
     async def menu_convert_last(self, user_id: str, room_id: str) -> str:
-        """Action to convert the last downloaded convertible file to PDF."""
+        """Convert the most recent (by name sort) file that can become PDF."""
         user_dir = self.downloads_dir / user_id
         if not user_dir.exists():
             return "📁 No files found."
@@ -602,25 +606,31 @@ class PrinterBot:
         if not files:
             return "📁 No files found."
 
-        # Find the last file that is convertible (Word or Excel)
-        convertible_exts = [".docx", ".doc", ".xlsx", ".xls"]
         last_convertible = None
         for f in reversed(files):
-            if any(f["name"].lower().endswith(ext) for ext in convertible_exts):
+            low = f["name"].lower()
+            if any(low.endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS):
                 last_convertible = f
                 break
 
         if not last_convertible:
-            return "📁 No convertible files found."
+            for f in reversed(files):
+                if f["name"].lower().endswith(".pdf"):
+                    return f"✅ Last file is already a PDF: {f['name']}"
+            return "📁 No convertible files found. Add a Word, Excel, PPT, OpenDocument, text, or HTML file."
 
         file_path = str(user_dir / last_convertible["name"])
-        pdf_path = await print_manager.convert_to_pdf_win(file_path)
+        before = sibling_pdf_if_any(file_path)
+        pdf_path, conv_err = await print_manager.convert_office_to_pdf(file_path)
         if pdf_path:
+            if before:
+                return f"✅ PDF already present: {Path(pdf_path).name}"
             return f"✅ Converted to PDF: {Path(pdf_path).name}"
-        return "❌ Conversion failed."
+        detail = f" {conv_err}" if conv_err else ""
+        return f"❌ Conversion failed.{detail}"[:600]
 
     async def menu_select_file_for_conversion(self, user_id: str, room_id: str):
-        """Show selection menu for conversion"""
+        """Show selection menu for conversion (convertible formats only)."""
         user_dir = self.downloads_dir / user_id
         if not user_dir.exists():
             return "📁 No files found."
@@ -629,8 +639,21 @@ class PrinterBot:
         if not files:
             return "📁 No files found."
 
+        convertible = [
+            f
+            for f in files
+            if any(
+                f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS
+            )
+        ][:20]
+        if not convertible:
+            for f in files:
+                if f["name"].lower().endswith(".pdf"):
+                    return "📁 Only pure PDFs here — add an office or text file to convert."
+            return "📁 No files that can be converted to PDF."
+
         options = {}
-        for i, f in enumerate(files[:20], 1):
+        for i, f in enumerate(convertible, 1):
             options[str(i)] = {
                 "text": f"📄 {f['name']}",
                 "action": "menu_convert_selected_file",
@@ -651,10 +674,14 @@ class PrinterBot:
         """Action for menu_select_file_for_conversion"""
         user_dir = self.downloads_dir / user_id
         file_path = str(user_dir / filename)
-        pdf_path = await print_manager.convert_to_pdf_win(file_path)
+        before = sibling_pdf_if_any(file_path)
+        pdf_path, conv_err = await print_manager.convert_office_to_pdf(file_path)
         if pdf_path:
+            if before:
+                return f"✅ PDF already present: {Path(pdf_path).name}"
             return f"✅ Converted: {Path(pdf_path).name}"
-        return f"❌ Conversion failed for {filename}"
+        detail = f" {conv_err}" if conv_err else ""
+        return f"❌ Conversion failed for {filename}.{detail}"[:600]
 
     async def menu_select_printer(self, user_id: str, room_id: str):
         """Show printer selection menu"""
@@ -879,13 +906,18 @@ class PrinterBot:
                     if command == "all":
                         result = await self.print_file(job["file_path"], sender_id)
                     elif command == "convert":
-                        pdf_path = await print_manager.convert_to_pdf_win(
+                        before = sibling_pdf_if_any(job["file_path"])
+                        pdf_path, conv_err = await print_manager.convert_office_to_pdf(
                             job["file_path"]
                         )
                         if pdf_path:
-                            result = f"✅ Converted: {Path(pdf_path).name}"
+                            if before:
+                                result = f"✅ PDF already present: {Path(pdf_path).name}"
+                            else:
+                                result = f"✅ Converted: {Path(pdf_path).name}"
                         else:
-                            result = "❌ Conversion failed."
+                            detail = f" {conv_err}" if conv_err else ""
+                            result = f"❌ Conversion failed.{detail}"[:600]
                     elif re.match(r"^\d+-\d+$", command):
                         result = await self.print_file(
                             job["file_path"], sender_id, page_range=command

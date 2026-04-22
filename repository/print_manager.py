@@ -2,10 +2,11 @@ import subprocess
 import os
 import re
 import shlex
+import shutil
 import asyncio
 import logging
 from pathlib import Path
-from typing import List, Optional, Dict
+from typing import List, Optional, Dict, Tuple
 from .config import config
 
 logger = logging.getLogger(__name__)
@@ -14,6 +15,73 @@ logger = logging.getLogger(__name__)
 def _ps_single_quoted(path: str) -> str:
     """Escape a path for use inside a PowerShell single-quoted (literal) string."""
     return path.replace("'", "''")
+
+
+def _pdf_output_path(path_obj: Path) -> str:
+    """Absolute path for the PDF next to the source file (same directory, same stem)."""
+    return str(path_obj.parent.resolve() / f"{path_obj.stem}.pdf")
+
+
+# Office + ODF + common text/web — LibreOffice converts these; Word/Excel COM used on
+# Windows only for a subset.
+CONVERT_TO_PDF_EXTENSIONS = frozenset(
+    {
+        ".doc",
+        ".docx",
+        ".xls",
+        ".xlsx",
+        ".xlsm",
+        ".csv",
+        ".ppt",
+        ".pptx",
+        ".ppsx",
+        ".odt",
+        ".ods",
+        ".odp",
+        ".odg",
+        ".rtf",
+        ".txt",
+        ".html",
+        ".htm",
+    }
+)
+
+
+def _existing_sibling_pdf(path_obj: Path) -> Optional[str]:
+    """
+    If a usable PDF is already next to the source, return its path.
+    If the file itself is a PDF, return that path.
+    """
+    if not path_obj.is_file() or path_obj.stat().st_size <= 0:
+        return None
+    if path_obj.suffix.lower() == ".pdf":
+        return str(path_obj)
+    out = _pdf_output_path(path_obj)
+    if os.path.isfile(out) and os.path.getsize(out) > 0:
+        return out
+    return None
+
+
+def sibling_pdf_if_any(file_path: str) -> Optional[str]:
+    """Public: path to a PDF to print/convert, if the file is PDF or a sibling .pdf exists."""
+    return _existing_sibling_pdf(Path(file_path).resolve())
+
+
+def _find_soffice_executable() -> Optional[str]:
+    """Resolve LibreOffice / OpenOffice headless converter if installed."""
+    for name in ("soffice", "libreoffice"):
+        found = shutil.which(name)
+        if found:
+            return found
+    if os.name == "nt":
+        for env_key in ("ProgramFiles", "ProgramFiles(x86)"):
+            root = os.environ.get(env_key)
+            if not root:
+                continue
+            candidate = Path(root) / "LibreOffice" / "program" / "soffice.exe"
+            if candidate.is_file():
+                return str(candidate)
+    return None
 
 
 class PrintManager:
@@ -178,20 +246,15 @@ class PrintManager:
             logger.error(f"Resume error: {e}")
             return False
 
-    async def convert_to_pdf_win(self, file_path: str) -> Optional[str]:
-        """Converts Word/Excel to PDF using native Windows COM (Fast & Reliable)."""
+    async def _convert_via_office_com(
+        self, path_obj: Path, output_pdf: str, ext: str
+    ) -> Tuple[Optional[str], str]:
+        """Windows-only Word/Excel COM export. Returns (pdf_path, failure_detail)."""
+        if os.name != "nt":
+            return None, ""
         try:
-            path_obj = Path(file_path).resolve()
-            output_pdf = str(path_obj.with_suffix(".pdf"))
-            ext = path_obj.suffix.lower()
-
-            # Remove existing PDF to ensure it's freshly created
-            if os.path.exists(output_pdf):
-                os.remove(output_pdf)
-
             if ext in [".docx", ".doc"]:
-                # Word: ExportAsFixedFormat(OutputFileName, ExportFormat) — not the same
-                # order as Excel. wdExportFormatPDF = 17. SaveAs2(..., 17) = wdFormatPDF.
+                # Word: ExportAsFixedFormat(OutputFileName, ExportFormat); wdExportFormatPDF=17
                 w_in = _ps_single_quoted(str(path_obj))
                 w_out = _ps_single_quoted(output_pdf)
                 ps_script = f"""
@@ -203,7 +266,7 @@ class PrintManager:
                     $word.DisplayAlerts = 0
                     $in = '{w_in}'
                     $out = '{w_out}'
-                    $doc = $word.Documents.Open($in, $false, $true, $false)
+                    $doc = $word.Documents.Open($in, $false, $false, $false)
                     try {{
                         $doc.ExportAsFixedFormat($out, 17)
                     }} catch {{
@@ -222,8 +285,7 @@ class PrintManager:
                 }}
                 """
                 engine = "Word-PDF"
-            elif ext in [".xlsx", ".xls"]:
-                # Excel: Workbook.ExportAsFixedFormat(Type, FileName) — 0 = xlTypePDF
+            elif ext in [".xlsx", ".xls", ".xlsm", ".csv"]:
                 e_in = _ps_single_quoted(str(path_obj))
                 e_out = _ps_single_quoted(output_pdf)
                 ps_script = f"""
@@ -251,50 +313,165 @@ class PrintManager:
                 """
                 engine = "Excel-PDF"
             else:
-                return None
+                return None, ""
 
             result = await self._run_powershell(ps_script, engine)
             if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0:
-                return output_pdf
+                return output_pdf, ""
+            detail = (result or "").strip()[:500] or "COM finished but no PDF file."
             logger.error(
                 "%s did not produce a valid PDF. PowerShell result: %s",
                 engine,
                 (result or "")[:800],
             )
-            return None
+            return None, detail
         except Exception as e:
-            logger.error(f"Native conversion error: {e}")
-            return None
+            logger.error("Native conversion error: %s", e)
+            return None, str(e)[:300]
+
+    async def _convert_via_libreoffice(
+        self, path_obj: Path, output_pdf: str
+    ) -> Tuple[Optional[str], str]:
+        exe = _find_soffice_executable()
+        if not exe:
+            return None, "Install LibreOffice (soffice) for conversion without Word, or fix Office COM."
+
+        src = str(path_obj.resolve())
+        outdir = str(path_obj.parent.resolve())
+        target_pdf = Path(output_pdf).resolve()
+        try:
+            if os.path.exists(output_pdf):
+                os.remove(output_pdf)
+        except OSError as e:
+            return None, f"Cannot replace PDF: {e}"
+
+        cmd = [
+            exe,
+            "--headless",
+            "--norestore",
+            "--nologo",
+            "--convert-to",
+            "pdf",
+            "--outdir",
+            outdir,
+            src,
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(), timeout=120
+            )
+        except asyncio.TimeoutError:
+            return None, "LibreOffice conversion timed out."
+        except Exception as e:
+            return None, f"LibreOffice: {e}"[:300]
+
+        # Some soffice builds write to cwd; move PDF beside the source if needed
+        cwd_candidate = Path.cwd() / f"{path_obj.stem}.pdf"
+        try:
+            if (
+                cwd_candidate.is_file()
+                and cwd_candidate.resolve() != target_pdf
+                and cwd_candidate.stat().st_size > 0
+            ):
+                if target_pdf.exists():
+                    target_pdf.unlink()
+                shutil.move(str(cwd_candidate), str(target_pdf))
+        except OSError as e:
+            logger.warning("LibreOffice cwd PDF relocate: %s", e)
+
+        if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0:
+            return output_pdf, ""
+
+        err = (stderr or b"").decode(errors="replace").strip()
+        out = (stdout or b"").decode(errors="replace").strip()
+        tail = (err or out)[:400] or f"exit {process.returncode}"
+        logger.error("LibreOffice PDF failed: %s", tail)
+        return None, tail
+
+    async def convert_office_to_pdf(self, file_path: str) -> Tuple[Optional[str], str]:
+        """
+        Convert a document to a PDF beside the source (same name, .pdf) when needed.
+        Skips if the file is already PDF or a valid sibling PDF already exists.
+        On Windows, tries Word/Excel COM for supported types, then LibreOffice.
+        """
+        path_obj = Path(file_path).resolve()
+        if not path_obj.is_file() or path_obj.stat().st_size <= 0:
+            return None, "Original file not found or is empty."
+        ext = path_obj.suffix.lower()
+        output_pdf = _pdf_output_path(path_obj)
+        if ext == ".pdf":
+            return str(path_obj), ""
+        if ext not in CONVERT_TO_PDF_EXTENSIONS:
+            return None, f"Cannot convert {ext} to PDF. Use Word, Excel, PPT, OpenDocument, text, or HTML formats."
+
+        existing = _existing_sibling_pdf(path_obj)
+        if existing:
+            return existing, ""
+
+        com_detail = ""
+        com_supported = (ext in {".doc", ".docx", ".xls", ".xlsx", ".xlsm", ".csv"})
+        if os.name == "nt" and com_supported:
+            pdf, com_detail = await self._convert_via_office_com(
+                path_obj, output_pdf, ext
+            )
+            if pdf:
+                return pdf, ""
+
+        pdf_lo, lo_detail = await self._convert_via_libreoffice(path_obj, output_pdf)
+        if pdf_lo:
+            return pdf_lo, ""
+
+        parts = []
+        if os.name == "nt" and com_detail:
+            parts.append(f"Office: {com_detail}")
+        if lo_detail:
+            parts.append(f"LibreOffice: {lo_detail}")
+        msg = " ".join(parts).strip()[:450]
+        return None, msg or "Conversion failed."
+
+    async def convert_to_pdf_win(self, file_path: str) -> Optional[str]:
+        """Backward-compatible: returns PDF path only, or None."""
+        path, _ = await self.convert_office_to_pdf(file_path)
+        return path
+
+    async def _lp_print(
+        self,
+        file_path: str,
+        selected_printer: Optional[str],
+        copies: int,
+        p_range: Optional[str],
+    ) -> str:
+        path_obj = Path(file_path)
+        cmd = ["lp"]
+        if selected_printer:
+            cmd.extend(["-d", selected_printer])
+        if copies > 1:
+            cmd.extend(["-n", str(copies)])
+        if p_range and re.match(r"^\d+(-\d+)?$", p_range):
+            cmd.extend(["-o", f"page-ranges={p_range}"])
+        cmd.append(str(path_obj))
+        process = await asyncio.create_subprocess_exec(
+            *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
+        )
+        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+        if process.returncode != 0:
+            return f"❌ Print failed: {stderr.decode()}"
+        return f"✅ Printed: {path_obj.name}"
 
     async def print_file(
         self, file_path: str, settings: Dict, page_range: Optional[str] = None
     ) -> str:
-        """Execute print command with Auto-PDF Pipeline for Windows Documents."""
+        """Print: use existing or converted PDF for convertible types, else native/lp."""
         try:
             path_obj = Path(file_path).resolve()
+            if not path_obj.is_file() or path_obj.stat().st_size <= 0:
+                return f"❌ File not found or empty: {file_path}"
             ext = path_obj.suffix.lower()
-
-            # 🚀 AUTO-PDF PIPELINE FOR WINDOWS (Office COM). Falls through to direct
-            # Word/Excel print if conversion is unavailable (no Office, COM blocked, etc.).
-            if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls"]:
-                logger.info(
-                    f"Auto-converting {path_obj.name} to PDF for stable printing..."
-                )
-                pdf_path = await self.convert_to_pdf_win(str(path_obj))
-                if pdf_path:
-                    result = await self._print_pdf_windows(
-                        pdf_path,
-                        settings.get("printer"),
-                        page_range,
-                        settings.get("copies", 1),
-                    )
-                    return f"✅ {path_obj.name} auto-converted and printed: {result}"
-                logger.warning(
-                    "Auto-conversion failed for %s; using direct Office print.",
-                    path_obj.name,
-                )
-
-            # Standard Logic (PDF, Images, or Direct Fallback)
             copies = min(settings.get("copies", 1), self.max_copies)
             selected_printer = settings.get("printer")
             p_range = (
@@ -303,12 +480,39 @@ class PrintManager:
                 else page_range.strip()
             )
 
-            if os.name == "nt":
-                if ext == ".pdf":
+            if ext == ".pdf":
+                if os.name == "nt":
                     return await self._print_pdf_windows(
                         str(path_obj), selected_printer, p_range, copies
                     )
-                elif ext in [".docx", ".doc"]:
+                return await self._lp_print(
+                    str(path_obj), selected_printer, copies, p_range
+                )
+
+            if ext in CONVERT_TO_PDF_EXTENSIONS:
+                pdf_for_print = _existing_sibling_pdf(path_obj)
+                conv_err = ""
+                if not pdf_for_print:
+                    pth, conv_err = await self.convert_office_to_pdf(str(path_obj))
+                    pdf_for_print = pth
+                if pdf_for_print:
+                    if os.name == "nt":
+                        r = await self._print_pdf_windows(
+                            pdf_for_print, selected_printer, p_range, copies
+                        )
+                        return f"✅ {path_obj.name} printed (PDF): {r}"
+                    return await self._lp_print(
+                        pdf_for_print, selected_printer, copies, p_range
+                    )
+                if conv_err:
+                    logger.warning(
+                        "PDF not available, falling back to direct print: %s — %s",
+                        path_obj.name,
+                        conv_err,
+                    )
+
+            if os.name == "nt":
+                if ext in [".docx", ".doc"]:
                     return await self._print_word_windows(
                         str(path_obj), selected_printer, p_range, copies
                     )
@@ -325,27 +529,9 @@ class PrintManager:
                         str(path_obj), selected_printer, p_range, copies
                     )
 
-            # LINUX LOGIC (Standard LP)
-            else:
-                cmd = ["lp"]
-                if selected_printer:
-                    cmd.extend(["-d", selected_printer])
-                if copies > 1:
-                    cmd.extend(["-n", str(copies)])
-                if p_range and re.match(r"^\d+(-\d+)?$", p_range):
-                    cmd.extend(["-o", f"page-ranges={p_range}"])
-
-                cmd.append(str(path_obj))
-                process = await asyncio.create_subprocess_exec(
-                    *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
-                )
-                stdout, stderr = await asyncio.wait_for(
-                    process.communicate(), timeout=60
-                )
-
-                if process.returncode != 0:
-                    return f"❌ Print failed: {stderr.decode()}"
-                return f"✅ Printed: {path_obj.name}"
+            return await self._lp_print(
+                str(path_obj), selected_printer, copies, p_range
+            )
 
         except Exception as e:
             logger.error(f"Print error: {e}")
