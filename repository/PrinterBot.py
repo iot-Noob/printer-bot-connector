@@ -151,7 +151,7 @@ class PrinterBot:
         ext = os.path.splitext(filename)[1].lower().strip(".")
         if ext in ("doc", "docx"):
             return "word"
-        if ext in ("xls", "xlsx"):
+        if ext in ("xls", "xlsx", "csv"):
             return "excel"
         if ext in ("ppt", "pptx"):
             return "powerpoint"
@@ -593,7 +593,7 @@ class PrinterBot:
         return "📊 Enter number of copies (1-99):"
 
     async def menu_convert_last(self, user_id: str, room_id: str) -> str:
-        """Action to convert the last downloaded file to PDF."""
+        """Action to convert the last downloaded convertible file to PDF."""
         user_dir = self.downloads_dir / user_id
         if not user_dir.exists():
             return "📁 No files found."
@@ -602,7 +602,18 @@ class PrinterBot:
         if not files:
             return "📁 No files found."
 
-        file_path = str(user_dir / files[-1]["name"])
+        # Find the last file that is convertible (Word or Excel)
+        convertible_exts = [".docx", ".doc", ".xlsx", ".xls"]
+        last_convertible = None
+        for f in reversed(files):
+            if any(f["name"].lower().endswith(ext) for ext in convertible_exts):
+                last_convertible = f
+                break
+
+        if not last_convertible:
+            return "📁 No convertible files found."
+
+        file_path = str(user_dir / last_convertible["name"])
         pdf_path = await print_manager.convert_to_pdf_win(file_path)
         if pdf_path:
             return f"✅ Converted to PDF: {Path(pdf_path).name}"

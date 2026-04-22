@@ -241,7 +241,7 @@ class PrintManager:
             ext = path_obj.suffix.lower()
 
             # 🚀 AUTO-PDF PIPELINE FOR WINDOWS
-            if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls"]:
+            if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls", ".csv"]:
                 logger.info(
                     f"Auto-converting {path_obj.name} to PDF for stable printing..."
                 )
@@ -276,7 +276,7 @@ class PrintManager:
                     return await self._print_word_windows(
                         str(path_obj), selected_printer, p_range, copies
                     )
-                elif ext in [".xlsx", ".xls"]:
+            elif ext in [".xlsx", ".xls", ".csv"]:
                     return await self._print_excel_windows(
                         str(path_obj), selected_printer, p_range, copies
                     )
