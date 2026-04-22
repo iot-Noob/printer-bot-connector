@@ -180,6 +180,10 @@ class PrintManager:
             output_pdf = str(path_obj.with_suffix(".pdf"))
             ext = path_obj.suffix.lower()
 
+            # Remove existing PDF to ensure it's freshly created
+            if os.path.exists(output_pdf):
+                os.remove(output_pdf)
+
             if ext in [".docx", ".doc"]:
                 ps_script = f"""
                 try {{
@@ -221,7 +225,7 @@ class PrintManager:
                 return None
 
             result = await self._run_powershell(ps_script, engine)
-            if "SUCCESS" in result and os.path.exists(output_pdf):
+            if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0:
                 return output_pdf
             return None
         except Exception as e:
