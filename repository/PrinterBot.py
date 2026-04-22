@@ -523,8 +523,21 @@ class PrinterBot:
             return "📁 No files found."
 
         files = await self._list_files_async(user_dir)
+        stems_with_doc = {
+            Path(f["name"]).stem
+            for f in files
+            if any(
+                f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS
+            )
+        }
         results = []
         for f in files:
+            p = Path(f["name"])
+            if p.suffix.lower() == ".pdf" and p.stem in stems_with_doc:
+                results.append(
+                    f"⏭️ Skipped {p.name} (same name as a document; already covered when printing the source file)."
+                )
+                continue
             res = await self.print_file(str(user_dir / f["name"]), user_id)
             results.append(res)
 
@@ -911,10 +924,11 @@ class PrinterBot:
                             job["file_path"]
                         )
                         if pdf_path:
+                            pr = await self.print_file(pdf_path, sender_id)
                             if before:
-                                result = f"✅ PDF already present: {Path(pdf_path).name}"
+                                result = f"✅ PDF ready ({Path(pdf_path).name}). {pr}"
                             else:
-                                result = f"✅ Converted: {Path(pdf_path).name}"
+                                result = f"✅ Converted to PDF and printing. {pr}"
                         else:
                             detail = f" {conv_err}" if conv_err else ""
                             result = f"❌ Conversion failed.{detail}"[:600]

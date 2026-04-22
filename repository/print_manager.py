@@ -47,19 +47,38 @@ CONVERT_TO_PDF_EXTENSIONS = frozenset(
 )
 
 
+def _normalize_printer_setting(printer: Optional[str]) -> Optional[str]:
+    """Treat UI placeholders as 'use default printer'."""
+    if printer is None:
+        return None
+    s = str(printer).strip()
+    if not s or s.lower() in ("default", "default printer", "none"):
+        return None
+    return s
+
+
 def _existing_sibling_pdf(path_obj: Path) -> Optional[str]:
     """
     If a usable PDF is already next to the source, return its path.
     If the file itself is a PDF, return that path.
+    For non-PDF sources, reuse sibling .pdf only if it is at least as new as the source
+    (avoids printing a stale PDF after the document was replaced).
     """
     if not path_obj.is_file() or path_obj.stat().st_size <= 0:
         return None
     if path_obj.suffix.lower() == ".pdf":
         return str(path_obj)
     out = _pdf_output_path(path_obj)
-    if os.path.isfile(out) and os.path.getsize(out) > 0:
-        return out
-    return None
+    if not (os.path.isfile(out) and os.path.getsize(out) > 0):
+        return None
+    try:
+        src_mtime = os.path.getmtime(path_obj)
+        pdf_mtime = os.path.getmtime(out)
+        if pdf_mtime + 0.5 < src_mtime:
+            return None
+    except OSError:
+        pass
+    return out
 
 
 def sibling_pdf_if_any(file_path: str) -> Optional[str]:
@@ -285,7 +304,7 @@ class PrintManager:
                 }}
                 """
                 engine = "Word-PDF"
-            elif ext in [".xlsx", ".xls", ".xlsm", ".csv"]:
+            elif ext in [".xlsx", ".xls", ".xlsm"]:
                 e_in = _ps_single_quoted(str(path_obj))
                 e_out = _ps_single_quoted(output_pdf)
                 ps_script = f"""
@@ -330,7 +349,7 @@ class PrintManager:
             return None, str(e)[:300]
 
     async def _convert_via_libreoffice(
-        self, path_obj: Path, output_pdf: str
+        self, path_obj: Path, output_pdf: str, convert_to: str = "pdf"
     ) -> Tuple[Optional[str], str]:
         exe = _find_soffice_executable()
         if not exe:
@@ -351,7 +370,7 @@ class PrintManager:
             "--norestore",
             "--nologo",
             "--convert-to",
-            "pdf",
+            convert_to,
             "--outdir",
             outdir,
             src,
@@ -390,8 +409,55 @@ class PrintManager:
         err = (stderr or b"").decode(errors="replace").strip()
         out = (stdout or b"").decode(errors="replace").strip()
         tail = (err or out)[:400] or f"exit {process.returncode}"
-        logger.error("LibreOffice PDF failed: %s", tail)
+        logger.error("LibreOffice PDF failed (%s): %s", convert_to, tail)
         return None, tail
+
+    async def _pandas_csv_to_pdf(
+        self, path_obj: Path, output_pdf: str
+    ) -> Tuple[Optional[str], str]:
+        """CSV → temporary XLSX (pandas) → LibreOffice → final PDF beside source."""
+
+        def _write_xlsx() -> Path:
+            import pandas as pd
+
+            tmp = path_obj.parent / f".{path_obj.stem}_botpandas_{os.getpid()}.xlsx"
+            pd.read_csv(path_obj, encoding_errors="replace").to_excel(
+                tmp, index=False, engine="openpyxl"
+            )
+            return tmp
+
+        try:
+            tmp_xlsx = await asyncio.to_thread(_write_xlsx)
+        except ImportError:
+            return None, ""
+        except Exception as e:
+            logger.warning("pandas CSV read failed: %s", e)
+            return None, str(e)[:200]
+
+        tmp_pdf = _pdf_output_path(tmp_xlsx)
+        try:
+            lo_pdf, err = await self._convert_via_libreoffice(tmp_xlsx, tmp_pdf, "pdf")
+            if lo_pdf and os.path.isfile(tmp_pdf) and os.path.getsize(tmp_pdf) > 0:
+                try:
+                    if os.path.abspath(tmp_pdf) != os.path.abspath(output_pdf):
+                        if os.path.isfile(output_pdf):
+                            os.remove(output_pdf)
+                        shutil.move(tmp_pdf, output_pdf)
+                    return output_pdf, ""
+                except OSError as e:
+                    return None, str(e)[:200]
+            return None, err or "pandas→XLSX→PDF failed"
+        finally:
+            try:
+                tmp_xlsx.unlink(missing_ok=True)
+            except OSError:
+                pass
+            try:
+                tp = Path(tmp_pdf)
+                if tp.is_file() and tp.resolve() != Path(output_pdf).resolve():
+                    tp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     async def convert_office_to_pdf(self, file_path: str) -> Tuple[Optional[str], str]:
         """
@@ -414,7 +480,8 @@ class PrintManager:
             return existing, ""
 
         com_detail = ""
-        com_supported = (ext in {".doc", ".docx", ".xls", ".xlsx", ".xlsm", ".csv"})
+        # CSV is unreliable via Excel COM (delimiters/encoding); use LibreOffice/pandas.
+        com_supported = ext in {".doc", ".docx", ".xls", ".xlsx", ".xlsm"}
         if os.name == "nt" and com_supported:
             pdf, com_detail = await self._convert_via_office_com(
                 path_obj, output_pdf, ext
@@ -422,15 +489,30 @@ class PrintManager:
             if pdf:
                 return pdf, ""
 
-        pdf_lo, lo_detail = await self._convert_via_libreoffice(path_obj, output_pdf)
-        if pdf_lo:
-            return pdf_lo, ""
+        lo_sequence = (
+            ["pdf:calc_pdf_Export", "pdf"] if ext == ".csv" else ["pdf"]
+        )
+        last_lo = ""
+        for cto in lo_sequence:
+            pdf_lo, lo_detail = await self._convert_via_libreoffice(
+                path_obj, output_pdf, cto
+            )
+            if pdf_lo:
+                return pdf_lo, ""
+            last_lo = lo_detail
+
+        if ext == ".csv":
+            pp, pe = await self._pandas_csv_to_pdf(path_obj, output_pdf)
+            if pp:
+                return pp, ""
+            if pe:
+                last_lo = (f"{last_lo} | {pe}" if last_lo else pe).strip()[:450]
 
         parts = []
         if os.name == "nt" and com_detail:
             parts.append(f"Office: {com_detail}")
-        if lo_detail:
-            parts.append(f"LibreOffice: {lo_detail}")
+        if last_lo:
+            parts.append(f"LibreOffice/pandas: {last_lo}")
         msg = " ".join(parts).strip()[:450]
         return None, msg or "Conversion failed."
 
@@ -473,7 +555,7 @@ class PrintManager:
                 return f"❌ File not found or empty: {file_path}"
             ext = path_obj.suffix.lower()
             copies = min(settings.get("copies", 1), self.max_copies)
-            selected_printer = settings.get("printer")
+            selected_printer = _normalize_printer_setting(settings.get("printer"))
             p_range = (
                 None
                 if not page_range or page_range.lower() == "all"
@@ -544,18 +626,40 @@ class PrintManager:
         p_range: Optional[str],
         copies: int,
     ) -> str:
-        """Prints PDF using SumatraPDF if available, else Edge."""
+        """Prints PDF using SumatraPDF if available (direct process, no PowerShell), else Edge."""
         sumatra_path = Path("bin/SumatraPDF.exe").resolve()
+        printer = _normalize_printer_setting(printer)
 
-        if sumatra_path.exists():
-            # SILENT SUMATRA PRINT
-            cmd_printer = f'-print-to "{printer}"' if printer else "-print-to-default"
-            cmd_range = f'-print-settings "{p_range}"' if p_range else ""
-
-            ps_cmd = (
-                f'& "{sumatra_path}" -silent {cmd_printer} {cmd_range} "{file_path}"'
-            )
-            return await self._run_powershell(ps_cmd, "PDF (Sumatra)")
+        if sumatra_path.is_file():
+            cmd: List[str] = [str(sumatra_path), "-silent"]
+            if printer:
+                cmd.extend(["-print-to", printer])
+            else:
+                cmd.append("-print-to-default")
+            settings_parts: List[str] = []
+            if copies and copies > 1:
+                settings_parts.append(f"{copies}x")
+            if p_range:
+                settings_parts.append(p_range)
+            if settings_parts:
+                cmd.extend(["-print-settings", ",".join(settings_parts)])
+            cmd.append(os.path.normpath(file_path))
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                await asyncio.sleep(2)
+                err = (stderr or b"").decode(errors="replace").strip()
+                if proc.returncode == 0:
+                    return "✅ Print successful via PDF (Sumatra)"
+                if proc.returncode == 1 and not err:
+                    return "✅ Print submitted via PDF (Sumatra)"
+                return f"❌ PDF (Sumatra) Error: {err[:200] or proc.returncode}"
+            except Exception as e:
+                return f"❌ PDF (Sumatra) System Error: {e}"
         else:
             # FALLBACK TO EDGE (Requires Default Swap for reliability)
             logger.warning(

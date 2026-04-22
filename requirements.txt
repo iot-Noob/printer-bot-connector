@@ -15,6 +15,10 @@ universal-printer>=3.0.0
 # PDF handling
 PyPDF2>=3.0.0
 
+# Optional: CSV → XLSX fallback when LibreOffice/Excel conversion fails
+pandas>=2.0.0
+openpyxl>=3.1.0
+
 # Async file operations
 aiofiles>=23.0.0
 
