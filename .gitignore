@@ -50,3 +50,5 @@ pip-wheel-metadata/
 **.vscode/**
 test_local/**
 user_settings.json
+.kilo**
+.ruff_cache**
