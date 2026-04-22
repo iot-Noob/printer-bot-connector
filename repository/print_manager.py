@@ -227,6 +227,11 @@ class PrintManager:
             result = await self._run_powershell(ps_script, engine)
             if os.path.exists(output_pdf) and os.path.getsize(output_pdf) > 0:
                 return output_pdf
+            logger.error(
+                "%s did not produce a valid PDF. PowerShell result: %s",
+                engine,
+                (result or "")[:800],
+            )
             return None
         except Exception as e:
             logger.error(f"Native conversion error: {e}")
@@ -240,14 +245,14 @@ class PrintManager:
             path_obj = Path(file_path).resolve()
             ext = path_obj.suffix.lower()
 
-            # 🚀 AUTO-PDF PIPELINE FOR WINDOWS
-            if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls", ".csv"]:
+            # 🚀 AUTO-PDF PIPELINE FOR WINDOWS (Office COM). Falls through to direct
+            # Word/Excel print if conversion is unavailable (no Office, COM blocked, etc.).
+            if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls"]:
                 logger.info(
                     f"Auto-converting {path_obj.name} to PDF for stable printing..."
                 )
                 pdf_path = await self.convert_to_pdf_win(str(path_obj))
                 if pdf_path:
-                    # Switch to the PDF for the actual print call
                     result = await self._print_pdf_windows(
                         pdf_path,
                         settings.get("printer"),
@@ -255,8 +260,10 @@ class PrintManager:
                         settings.get("copies", 1),
                     )
                     return f"✅ {path_obj.name} auto-converted and printed: {result}"
-                else:
-                    return f"❌ Auto-conversion failed for {path_obj.name}. Falling back to direct (unstable) print..."
+                logger.warning(
+                    "Auto-conversion failed for %s; using direct Office print.",
+                    path_obj.name,
+                )
 
             # Standard Logic (PDF, Images, or Direct Fallback)
             copies = min(settings.get("copies", 1), self.max_copies)
