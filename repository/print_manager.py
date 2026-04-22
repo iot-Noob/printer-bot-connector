@@ -231,18 +231,20 @@ class PrintManager:
         try:
             path_obj = Path(file_path).resolve()
             ext = path_obj.suffix.lower()
-            
+
             # 🚀 AUTO-PDF PIPELINE FOR WINDOWS
             if os.name == "nt" and ext in [".docx", ".doc", ".xlsx", ".xls"]:
-                logger.info(f"Auto-converting {path_obj.name} to PDF for stable printing...")
+                logger.info(
+                    f"Auto-converting {path_obj.name} to PDF for stable printing..."
+                )
                 pdf_path = await self.convert_to_pdf_win(str(path_obj))
                 if pdf_path:
                     # Switch to the PDF for the actual print call
                     result = await self._print_pdf_windows(
-                        pdf_path, 
-                        settings.get("printer"), 
-                        page_range, 
-                        settings.get("copies", 1)
+                        pdf_path,
+                        settings.get("printer"),
+                        page_range,
+                        settings.get("copies", 1),
                     )
                     return f"✅ {path_obj.name} auto-converted and printed: {result}"
                 else:
