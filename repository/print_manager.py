@@ -11,6 +11,11 @@ from .config import config
 logger = logging.getLogger(__name__)
 
 
+def _ps_single_quoted(path: str) -> str:
+    """Escape a path for use inside a PowerShell single-quoted (literal) string."""
+    return path.replace("'", "''")
+
+
 class PrintManager:
     def __init__(self):
         self.max_copies = config.max_copies
@@ -185,39 +190,63 @@ class PrintManager:
                 os.remove(output_pdf)
 
             if ext in [".docx", ".doc"]:
+                # Word: ExportAsFixedFormat(OutputFileName, ExportFormat) — not the same
+                # order as Excel. wdExportFormatPDF = 17. SaveAs2(..., 17) = wdFormatPDF.
+                w_in = _ps_single_quoted(str(path_obj))
+                w_out = _ps_single_quoted(output_pdf)
                 ps_script = f"""
+                $word = $null
+                $doc = $null
                 try {{
                     $word = New-Object -ComObject Word.Application
                     $word.Visible = $false
-                    $doc = $word.Documents.Open("{str(path_obj)}", $false, $true)
+                    $word.DisplayAlerts = 0
+                    $in = '{w_in}'
+                    $out = '{w_out}'
+                    $doc = $word.Documents.Open($in, $false, $true, $false)
                     try {{
-                        $doc.ExportAsFixedFormat(17, "{output_pdf}")
+                        $doc.ExportAsFixedFormat($out, 17)
                     }} catch {{
-                        $doc.SaveAs([ref]"{output_pdf}", [ref]17)
+                        $doc.SaveAs2($out, 17)
                     }}
                     $doc.Close($false)
+                    $doc = $null
                     $word.Quit()
+                    $word = $null
                     Write-Output "SUCCESS"
                 }} catch {{
                     Write-Error $_.Exception.Message
-                    if($word) {{ $word.Quit() }}
+                }} finally {{
+                    if ($null -ne $doc) {{ try {{ $doc.Close($false) }} catch {{}} }}
+                    if ($null -ne $word) {{ try {{ $word.Quit() }} catch {{}} }}
                 }}
                 """
                 engine = "Word-PDF"
             elif ext in [".xlsx", ".xls"]:
+                # Excel: Workbook.ExportAsFixedFormat(Type, FileName) — 0 = xlTypePDF
+                e_in = _ps_single_quoted(str(path_obj))
+                e_out = _ps_single_quoted(output_pdf)
                 ps_script = f"""
+                $xl = $null
+                $wb = $null
                 try {{
                     $xl = New-Object -ComObject Excel.Application
                     $xl.Visible = $false
-                    $wb = $xl.Workbooks.Open("{str(path_obj)}")
-                    # 0 = xlTypePDF
-                    $wb.ExportAsFixedFormat(0, "{output_pdf}")
+                    $xl.DisplayAlerts = $false
+                    $in = '{e_in}'
+                    $out = '{e_out}'
+                    $wb = $xl.Workbooks.Open($in)
+                    $wb.ExportAsFixedFormat(0, $out)
                     $wb.Close($false)
+                    $wb = $null
                     $xl.Quit()
+                    $xl = $null
                     Write-Output "SUCCESS"
                 }} catch {{
                     Write-Error $_.Exception.Message
-                    if($xl) {{ $xl.Quit() }}
+                }} finally {{
+                    if ($null -ne $wb) {{ try {{ $wb.Close($false) }} catch {{}} }}
+                    if ($null -ne $xl) {{ try {{ $xl.Quit() }} catch {{}} }}
                 }}
                 """
                 engine = "Excel-PDF"
