@@ -371,6 +371,8 @@ class PrinterBot:
                 "1": {"text": "Print All Files", "action": self.menu_print_all},
                 "2": {"text": "Print Last File", "action": self.menu_print_last},
                 "3": {"text": "Select File to Print", "action": self.menu_select_file},
+                "4": {"text": "Convert Last to PDF", "action": self.menu_convert_last},
+                "5": {"text": "Select File to Convert", "action": self.menu_select_file_for_conversion},
                 "b": {"text": "◀ Back", "next_menu": "main"},
             },
         )
@@ -552,7 +554,8 @@ class PrinterBot:
         pages = await self.estimate_pages(file_path, filename)
         if pages > 1:
             await self.rocket.send_message(
-                f"📄 {filename} has {pages} pages. Range (e.g. 1-2):", room_id
+                f"✅ Received: {filename}\n🖨️ Type 'all' to print, or 'convert' to PDF.",
+                room_id,
             )
             self.pending_jobs[user_id] = {"file_path": file_path, "filename": filename}
             return False
@@ -574,7 +577,54 @@ class PrinterBot:
     async def menu_set_copies(self, user_id: str, room_id: str) -> str:
         return "📊 Enter number of copies (1-99):"
 
-    # ============ NEW: Multi-Printer Support ============
+    async def menu_convert_last(self, user_id: str, room_id: str) -> str:
+        """Action to convert the last downloaded file to PDF."""
+        user_dir = self.downloads_dir / user_id
+        if not user_dir.exists():
+            return "📁 No files found."
+
+        files = await self._list_files_async(user_dir)
+        if not files:
+            return "📁 No files found."
+
+        file_path = str(user_dir / files[-1]["name"])
+        pdf_path = await print_manager.convert_to_pdf_win(file_path)
+        if pdf_path:
+            return f"✅ Converted to PDF: {Path(pdf_path).name}"
+        return "❌ Conversion failed."
+
+    async def menu_select_file_for_conversion(self, user_id: str, room_id: str):
+        """Show selection menu for conversion"""
+        user_dir = self.downloads_dir / user_id
+        if not user_dir.exists():
+            return "📁 No files found."
+
+        files = await self._list_files_async(user_dir)
+        if not files:
+            return "📁 No files found."
+
+        options = {}
+        for i, f in enumerate(files[:20], 1):
+            options[str(i)] = {
+                "text": f"📄 {f['name']}",
+                "action": "menu_convert_selected_file",
+                "args": {"filename": f["name"]},
+            }
+
+        options["b"] = {"text": "◀ Back", "next_menu": "print_menu"}
+        self.dmc.register_callable_menu("convert_select", "📁 Select File to Convert", options)
+        await self.dmc.set_user_menu(user_id, "convert_select")
+        await self.dmc._display_menu(user_id, room_id, "convert_select")
+        return False
+
+    async def menu_convert_selected_file(self, user_id: str, room_id: str, filename: str) -> str:
+        """Action for menu_select_file_for_conversion"""
+        user_dir = self.downloads_dir / user_id
+        file_path = str(user_dir / filename)
+        pdf_path = await print_manager.convert_to_pdf_win(file_path)
+        if pdf_path:
+            return f"✅ Converted: {Path(pdf_path).name}"
+        return f"❌ Conversion failed for {filename}"
 
     async def menu_select_printer(self, user_id: str, room_id: str):
         """Show printer selection menu"""
@@ -747,6 +797,12 @@ class PrinterBot:
                     job = self.pending_jobs.pop(sender_id)
                     if command == "all":
                         result = await self.print_file(job["file_path"], sender_id)
+                    elif command == "convert":
+                        pdf_path = await print_manager.convert_to_pdf_win(job["file_path"])
+                        if pdf_path:
+                            result = f"✅ Converted: {Path(pdf_path).name}"
+                        else:
+                            result = "❌ Conversion failed."
                     elif re.match(r"^\d+-\d+$", command):
                         result = await self.print_file(
                             job["file_path"], sender_id, page_range=command
