@@ -360,6 +360,7 @@ class PrinterBot:
                 "2": {"text": "🖨️ Print Files", "next_menu": "print_menu"},
                 "3": {"text": "⚙️ Printer Settings", "next_menu": "settings_menu"},
                 "4": {"text": "📊 Printer Status", "next_menu": "status_menu"},
+                "5": {"text": "🗑️ File Management", "next_menu": "file_menu"},
                 "h": {"text": "❓ Help", "action": self.menu_help},
             },
         )
@@ -372,7 +373,10 @@ class PrinterBot:
                 "2": {"text": "Print Last File", "action": self.menu_print_last},
                 "3": {"text": "Select File to Print", "action": self.menu_select_file},
                 "4": {"text": "Convert Last to PDF", "action": self.menu_convert_last},
-                "5": {"text": "Select File to Convert", "action": self.menu_select_file_for_conversion},
+                "5": {
+                    "text": "Select File to Convert",
+                    "action": self.menu_select_file_for_conversion,
+                },
                 "b": {"text": "◀ Back", "next_menu": "main"},
             },
         )
@@ -465,6 +469,17 @@ class PrinterBot:
                 "2": {"text": "Print Queue", "action": self.menu_show_queue},
                 "3": {"text": "Cancel Job", "action": self.menu_cancel_job},
                 "4": {"text": "Retry/Resume Job", "action": self.menu_retry_job},
+                "b": {"text": "◀ Back", "next_menu": "main"},
+            },
+        )
+
+        self.dmc.register_callable_menu(
+            "file_menu",
+            "🗑️ File Management",
+            {
+                "1": {"text": "📁 Show Downloads", "action": self.menu_show_downloads},
+                "2": {"text": "🗑️ Remove File", "action": self.menu_remove_file},
+                "3": {"text": "💥 Remove All Files", "action": self.menu_remove_all},
                 "b": {"text": "◀ Back", "next_menu": "main"},
             },
         )
@@ -612,12 +627,16 @@ class PrinterBot:
             }
 
         options["b"] = {"text": "◀ Back", "next_menu": "print_menu"}
-        self.dmc.register_callable_menu("convert_select", "📁 Select File to Convert", options)
+        self.dmc.register_callable_menu(
+            "convert_select", "📁 Select File to Convert", options
+        )
         await self.dmc.set_user_menu(user_id, "convert_select")
         await self.dmc._display_menu(user_id, room_id, "convert_select")
         return False
 
-    async def menu_convert_selected_file(self, user_id: str, room_id: str, filename: str) -> str:
+    async def menu_convert_selected_file(
+        self, user_id: str, room_id: str, filename: str
+    ) -> str:
         """Action for menu_select_file_for_conversion"""
         user_dir = self.downloads_dir / user_id
         file_path = str(user_dir / filename)
@@ -739,8 +758,8 @@ class PrinterBot:
         count = 0
         for q in queue:
             # Fix: Platform specific strings logic
-            match = re.search(r"#(\d+)", q) if os.name == 'nt' else (q, )
-            target_id = match.group(1) if os.name == 'nt' and match else q
+            match = re.search(r"#(\d+)", q) if os.name == "nt" else (q,)
+            target_id = match.group(1) if os.name == "nt" and match else q
             if await print_manager.cancel_print_job(target_id):
                 count += 1
         return f"🔥 Cancelled {count} jobs from queue."
@@ -750,12 +769,63 @@ class PrinterBot:
         queue = await print_manager.get_print_queue()
         count = 0
         for q in queue:
-            match = re.search(r"#(\d+)", q) if os.name == 'nt' else (q, )
-            target_id = match.group(1) if os.name == 'nt' and match else q
+            match = re.search(r"#(\d+)", q) if os.name == "nt" else (q,)
+            target_id = match.group(1) if os.name == "nt" and match else q
             if await print_manager.resume_print_job(target_id):
                 count += 1
         return f"🚀 Resumed {count} jobs in queue."
 
+    async def menu_remove_file(self, user_id: str, room_id: str):
+        """Show file selection menu for removal"""
+        user_dir = self.downloads_dir / user_id
+        if not user_dir.exists():
+            return "📁 No files found."
+
+        files = await self._list_files_async(user_dir)
+        if not files:
+            return "📁 No files found."
+
+        options = {}
+        for i, f in enumerate(files[:20], 1):
+            options[str(i)] = {
+                "text": f"🗑️ {f['name']}",
+                "action": "menu_remove_selected_file",
+                "args": {"filename": f["name"]},
+            }
+
+        options["b"] = {"text": "◀ Back", "next_menu": "file_menu"}
+        self.dmc.register_callable_menu(
+            "remove_select", "🗑️ Select File to Remove", options
+        )
+        await self.dmc.set_user_menu(user_id, "remove_select")
+        await self.dmc._display_menu(user_id, room_id, "remove_select")
+        return False
+
+    async def menu_remove_selected_file(
+        self, user_id: str, room_id: str, filename: str
+    ) -> str:
+        """Remove the selected file"""
+        user_dir = self.downloads_dir / user_id
+        file_path = user_dir / filename
+        if file_path.exists():
+            file_path.unlink()
+            return f"✅ Removed: {filename}"
+        return f"❌ File not found: {filename}"
+
+    async def menu_remove_all(self, user_id: str, room_id: str) -> str:
+        """Remove all files in user's download directory"""
+        user_dir = self.downloads_dir / user_id
+        if not user_dir.exists():
+            return "📁 No files found."
+
+        files = await self._list_files_async(user_dir)
+        count = 0
+        for f in files:
+            file_path = user_dir / f["name"]
+            if file_path.exists():
+                file_path.unlink()
+                count += 1
+        return f"🗑️ Removed {count} files."
 
     async def chat_bot(
         self,
@@ -798,7 +868,9 @@ class PrinterBot:
                     if command == "all":
                         result = await self.print_file(job["file_path"], sender_id)
                     elif command == "convert":
-                        pdf_path = await print_manager.convert_to_pdf_win(job["file_path"])
+                        pdf_path = await print_manager.convert_to_pdf_win(
+                            job["file_path"]
+                        )
                         if pdf_path:
                             result = f"✅ Converted: {Path(pdf_path).name}"
                         else:
@@ -839,14 +911,6 @@ class PrinterBot:
                         f"├─ Printer: {selected_printer}\n"
                         f"└─ Connected: ✅",
                         room_id,
-                    )
-                    return
-
-                # Copies shortcut
-                if command.isdigit() and 1 <= int(command) <= self.config.max_copies:
-                    await self.update_user_settings(sender_id, "copies", int(command))
-                    await self.rocket.send_message(
-                        f"✅ Copies set to: {command}", room_id
                     )
                     return
 

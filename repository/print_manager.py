@@ -186,7 +186,11 @@ class PrintManager:
                     $word = New-Object -ComObject Word.Application
                     $word.Visible = $false
                     $doc = $word.Documents.Open("{str(path_obj)}", $false, $true)
-                    $doc.SaveAs([ref]"{output_pdf}", [ref]17)
+                    try {{
+                        $doc.ExportAsFixedFormat(17, "{output_pdf}")
+                    }} catch {{
+                        $doc.SaveAs([ref]"{output_pdf}", [ref]17)
+                    }}
                     $doc.Close($false)
                     $word.Quit()
                     Write-Output "SUCCESS"
