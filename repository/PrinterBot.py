@@ -75,6 +75,9 @@ load_dotenv()
 
 
 class PrinterBot:
+    # Allowed file extensions for automatic processing
+    ALLOWED_EXTENSIONS = {".doc", ".docx", ".pdf", ".bmp", ".png", ".jpg", ".jpeg"}
+
     def __init__(self):
         self.config = config
         self.mainLock = asyncio.Lock()
@@ -103,7 +106,8 @@ class PrinterBot:
         "├─ `m` - Open main menu (shortcut)\n"
         "├─ `help` - Show this help\n"
         "├─ `h` - Show this help (shortcut)\n"
-        "└─ `status` - Check bot status"
+        "├─ `status` - Check bot status\n"
+        "└─ Supported file types: .doc, .docx, .pdf, .bmp, .png, .jpg, .jpeg"
     )
 
     def _check_rate_limit(self, user_id: str) -> bool:
@@ -526,9 +530,7 @@ class PrinterBot:
         stems_with_doc = {
             Path(f["name"]).stem
             for f in files
-            if any(
-                f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS
-            )
+            if any(f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS)
         }
         results = []
         for f in files:
@@ -655,9 +657,7 @@ class PrinterBot:
         convertible = [
             f
             for f in files
-            if any(
-                f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS
-            )
+            if any(f["name"].lower().endswith(e) for e in CONVERT_TO_PDF_EXTENSIONS)
         ][:20]
         if not convertible:
             for f in files:
@@ -893,6 +893,16 @@ class PrinterBot:
                 ra = [dict(ra) for ra in attachments]
                 title = ra[0].get("title", "")
                 image_link = ra[0].get("title_link", "")
+
+                # Validate file extension
+                file_extension = os.path.splitext(title.lower())[1]
+                if file_extension not in self.ALLOWED_EXTENSIONS:
+                    await self.rocket.send_message(
+                        f"❌ Unsupported file type: {file_extension}. "
+                        f"Only {', '.join(sorted(self.ALLOWED_EXTENSIONS))} files are allowed.",
+                        room_id,
+                    )
+                    return
 
                 # Rate limiting check
                 if not self._check_rate_limit(sender_id):
